@@ -323,7 +323,7 @@ Setup. An `--answers` file holds secrets in clear text: delete it afterwards.
 
 The complete flow passes in virtual machines for both Secure Boot methods: the wizard, Arch Linux,
 Windows 11 installed unattended, key enrollment, and both systems booting from the GRUB menu, with an
-NVMe disk, Wi-Fi only and simulated laptop sensors. **362 unit and wizard tests pass.** The real
+NVMe disk, Wi-Fi only and simulated laptop sensors. **367 unit and wizard tests pass.** The real
 wizard was also driven key by key in VMs (hundreds of checks), and the installation steps run for
 real against disk images in containers.
 

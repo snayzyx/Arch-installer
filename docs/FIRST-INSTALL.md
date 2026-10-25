@@ -30,7 +30,10 @@ start; the disk you choose is **erased completely**.
 
 1. Boot the stick (boot menu key, often F12). The wizard starts by itself.
 2. Answer the questions. Check the **Summary** screen carefully: it names the disk that will be
-   erased. Type the confirmation it asks for.
+   erased. Type the confirmation it asks for. The **Extras** screen (9) offers developer tools,
+   VSCodium, LibreWolf, Postman and a desktop shell (MacShell, Revo Shell, Caelestia); everything there is
+   optional, and a first try on a new machine is easier with the default setup. The desktop shells are
+   downloaded in their latest version, so they need the connection to be up (they take 5-30 minutes more).
 3. The installer partitions the disk and installs Arch Linux (about 5-10 minutes with a good
    connection). When it says it is finished, press **Reboot now** and remove the USB stick.
 4. **Do not touch the keyboard.** The first restart starts Windows Setup on its own: it takes about
