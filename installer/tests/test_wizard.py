@@ -13,6 +13,7 @@ from dualboot_installer.config import InstallConfig
 from dualboot_installer.screens import install as install_module
 from dualboot_installer.screens.arch import AccountsScreen, SoftwareScreen, StorageScreen
 from dualboot_installer.screens.disk import DiskScreen, LayoutScreen
+from dualboot_installer.screens.extras import ExtrasScreen
 from dualboot_installer.screens.install import InstallScreen, final_button_label
 from dualboot_installer.screens.network import NetworkScreen
 from dualboot_installer.screens.region import RegionScreen
@@ -83,6 +84,7 @@ async def to_windows_source(app, pilot):
     set_input(app, "#user-pass2", "s3cret")
     await next_screen(app, pilot, StorageScreen)
     await next_screen(app, pilot, SoftwareScreen)
+    await next_screen(app, pilot, ExtrasScreen)
     await next_screen(app, pilot, WindowsSourceScreen)
 
 
@@ -131,6 +133,7 @@ def test_full_dry_run_flow():
             set_input(app, "#user-pass2", "s3cret")
             await next_screen(app, pilot, StorageScreen)
             await next_screen(app, pilot, SoftwareScreen)
+            await next_screen(app, pilot, ExtrasScreen)
             await next_screen(app, pilot, WindowsSourceScreen)
             arch = app.cfg.arch
             assert arch.filesystem == "ext4" and not arch.luks_enabled
@@ -319,6 +322,7 @@ def test_offline_build_offers_the_included_windows_iso_and_locks_language_and_ed
             set_input(app, "#user-pass2", "s3cret")
             await next_screen(app, pilot, StorageScreen)
             await next_screen(app, pilot, SoftwareScreen)
+            await next_screen(app, pilot, ExtrasScreen)
             await next_screen(app, pilot, WindowsSourceScreen)
 
             # The included ISO is the default; its language replaces the language picker.
@@ -362,6 +366,7 @@ def test_included_iso_without_the_chosen_edition_is_refused():
             set_input(app, "#user-pass2", "s3cret")
             await next_screen(app, pilot, StorageScreen)
             await next_screen(app, pilot, SoftwareScreen)
+            await next_screen(app, pilot, ExtrasScreen)
             await next_screen(app, pilot, WindowsSourceScreen)
             # Pro is missing from this ISO, so it is greyed out and Home is selected instead.
             buttons = {b.name: b for b in app.screen.query_one("#edition").query(RadioButton)}

@@ -21,6 +21,12 @@
 .PARAMETER WindowsIso
   Path of a Windows 11 installation ISO (x64) to bundle into the image.
 
+.PARAMETER DriversDir
+  A folder of extracted Windows driver packages (each with its .inf, .cat and .sys files: Wi-Fi, network,
+  Bluetooth...) to carry in the image under windows/drivers/. The installer gives them to the new Windows
+  (C:\Drivers). Useful when a stock Windows has no driver for the laptop's Wi-Fi card. It works with or
+  without -WindowsIso. Drivers of the Windows that is already on the disk are kept automatically, without this.
+
 .EXAMPLE
   .\build.ps1
 
@@ -31,7 +37,8 @@
 param(
   [switch]$SkipImage,
   [string]$OutDir,
-  [string]$WindowsIso
+  [string]$WindowsIso,
+  [string]$DriversDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -96,6 +103,21 @@ if ($WindowsIso) {
   $OfflineArgs = @('-v', "${WindowsIso}:/windows/Windows11.iso:ro", '-e', 'WINDOWS_ISO=/windows/Windows11.iso')
 }
 
+# Extra `docker run` arguments for bundled drivers.
+$DriverArgs = @()
+if ($DriversDir) {
+  if (-not (Test-Path -LiteralPath $DriversDir -PathType Container)) {
+    throw "Drivers folder not found: $DriversDir"
+  }
+  $DriversDir = (Resolve-Path -LiteralPath $DriversDir).Path
+  $InfCount = (Get-ChildItem -LiteralPath $DriversDir -Recurse -Filter *.inf -File -ErrorAction SilentlyContinue | Measure-Object).Count
+  if ($InfCount -eq 0) {
+    throw "$DriversDir holds no .inf file: extract the driver packages (not an .exe or .msi) into it first."
+  }
+  Write-Host ('Bundling {0} driver package file(s) (.inf) from {1}.' -f $InfCount, $DriversDir) -ForegroundColor Yellow
+  $DriverArgs = @('-v', "${DriversDir}:/drivers-source:ro", '-e', 'DRIVERS_DIR=/drivers-source')
+}
+
 Assert-Docker
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -116,6 +138,7 @@ Write-Host '==> Building the ISO' -ForegroundColor Cyan
 Invoke-Native {
   docker run --rm --privileged `
     @OfflineArgs `
+    @DriverArgs `
     -v "${PSScriptRoot}:/src:ro" `
     -v "${OutDir}:/out" `
     -v archinstall-pkgcache:/var/cache/pacman/pkg `

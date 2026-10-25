@@ -12,6 +12,14 @@
 #   DOWNLOAD_SOURCE=1 with WINDOWS_ISO: the installer downloads that ISO from a local HTTPS server
 #   AUR_HELPER        none (default), paru or yay
 #   LAPTOP=1          laptop answers: arch.laptop, a Wi-Fi network, hybrid Intel + NVIDIA graphics
+#   DEV_GROUPS        comma-separated developer tool groups (languages,cli,docker): arch.dev_groups
+#   APPS              comma-separated desktop applications (vscodium,librewolf,postman): arch.apps
+#   DRIVERS_FROM      a folder of driver packages that is copied into /run/archiso/bootmnt/windows/drivers before the install,
+#                     as if they were bundled in the ISO (build.ps1 -DriversDir); checks-drivers.sh checks what was staged
+#   DOTFILES          desktop shell preset (macshell, caelestia): arch.dotfiles. Its checks live in
+#                     checks-dotfiles-<id>.sh next to this script (sourced after the other checks)
+#   AUR_BREAK=1       make the AUR unreachable for the installed system (failure path: the installation must still succeed)
+#   AUR_BREAK=early   same, and already unreachable when the installer starts (its check before the disk is erased)
 #   EVIDENCE_DIR      a directory (mounted) that receives the generated Windows scripts and logs
 # Run it through scripts/test-install.ps1 (Docker Desktop must be running).
 set -euo pipefail
@@ -26,6 +34,10 @@ done
 AUR_HELPER="${AUR_HELPER:-none}"
 DOWNLOAD_SOURCE="${DOWNLOAD_SOURCE:-}"
 LAPTOP="${LAPTOP:-}"
+DEV_GROUPS="${DEV_GROUPS:-}"
+APPS="${APPS:-}"
+DOTFILES="${DOTFILES:-}"
+AUR_BREAK="${AUR_BREAK:-}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-}"
 STARTED_AT=$SECONDS
 # WINDOWS_ISO (a path inside the container) turns on the full install: Windows is staged too, and
@@ -89,6 +101,12 @@ exit 0
 EOF
 chmod +x /usr/local/bin/udevadm
 
+if [[ -n "${DRIVERS_FROM:-}" ]]; then
+  # What `build.ps1 -DriversDir` puts on the ISO, where the installer looks for it.
+  mkdir -p /run/archiso/bootmnt/windows/drivers
+  cp -a "$DRIVERS_FROM"/. /run/archiso/bootmnt/windows/drivers/
+fi
+
 log "Answers"
 ROOT_GIB=64
 [[ -n "$HOME_PART" ]] && ROOT_GIB=20
@@ -117,7 +135,7 @@ exit $rc
 EOF
   chmod +x /usr/local/bin/curl
 fi
-export LOOP STRATEGY FS DESKTOP LUKS HOME_PART SHARED ROOT_GIB PASSPHRASE WINDOWS_ISO DOWNLOAD_SOURCE AUR_HELPER LAPTOP
+export LOOP STRATEGY FS DESKTOP LUKS HOME_PART SHARED ROOT_GIB PASSPHRASE WINDOWS_ISO DOWNLOAD_SOURCE AUR_HELPER LAPTOP DEV_GROUPS APPS DOTFILES
 export ISO_URL="${ISO_SERVER_URL:-}"
 python - >/tmp/answers.json <<'PY'
 import json, os
@@ -139,6 +157,13 @@ if e.get("WINDOWS_ISO"):
         windows.update(iso_source="local", iso_path=e["WINDOWS_ISO"], edition="Pro")
 answers = {"disk": disk, "arch": arch, "windows": windows,
            "secureboot": {"strategy": e["STRATEGY"], "mok_password": "Abcd1234", "touch_firmware": False}}
+split = lambda name: [item for item in e.get(name, "").split(",") if item]
+if e.get("DEV_GROUPS"):
+    arch["dev_groups"] = split("DEV_GROUPS")
+if e.get("APPS"):
+    arch["apps"] = split("APPS")
+if e.get("DOTFILES"):
+    arch["dotfiles"] = e["DOTFILES"]
 if flag("LAPTOP"):
     arch.update(laptop=True, gpu_profiles=["intel", "nvidia-open"])
     answers["network"] = {"wifi_ssid": "TestNet", "wifi_security": "psk", "wifi_passphrase": "wifi-test-pass-2026"}
@@ -151,10 +176,25 @@ cd /src/installer
 INSTALLER_ARGS=(--answers /tmp/answers.json --confirm-erase "$LOOP")
 [[ -n "$WINDOWS_ISO" ]] || INSTALLER_ARGS+=(--partial) # without a Windows ISO, install Arch only
 INSTALLER_CMD=(python -m dualboot_installer)
+if [[ "$AUR_BREAK" == early ]]; then
+  echo "0.0.0.0 aur.archlinux.org" >>/etc/hosts  # the installer's own checks, run from this container, see it too
+fi
+if [[ -n "$AUR_BREAK" ]]; then
+  # Failure path: once the installer has written /etc/hosts of the new system (the configure step, long
+  # before the AUR step), point the AUR at 0.0.0.0. The chroot resolves names from that file first.
+  ( while ! grep -q testbox /mnt/etc/hosts 2>/dev/null; do sleep 1; done
+    echo "0.0.0.0 aur.archlinux.org" >>/mnt/etc/hosts
+    echo "AUR_BREAK: the AUR was made unreachable at $((SECONDS - STARTED_AT)) s" >>/tmp/aur-break.log ) &
+  AUR_BREAK_PID=$!
+fi
 set +e
-PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/src/installer "${INSTALLER_CMD[@]}" "${INSTALLER_ARGS[@]}" 2>&1 | tee /tmp/installer.log
+# A second copy of the output with the elapsed seconds in front of every line, to time the phases.
+PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/src/installer "${INSTALLER_CMD[@]}" "${INSTALLER_ARGS[@]}" 2>&1 \
+  | tee /tmp/installer.log >(while IFS= read -r line; do printf '%s\t%s\n' "$((SECONDS - STARTED_AT))" "$line"; done >/tmp/installer.ts.log)
 INSTALLER_STATUS=${PIPESTATUS[0]}
 set -e
+sleep 2  # let the timestamping copy finish
+[[ -n "${AUR_BREAK_PID:-}" ]] && kill "$AUR_BREAK_PID" 2>/dev/null || true
 if [[ $INSTALLER_STATUS -ne 0 ]]; then
   echo "--- diagnostics ---"
   findmnt -R /mnt || true
@@ -240,9 +280,13 @@ if [[ -n "$HOME_PART" ]]; then
 fi
 if [[ "$DESKTOP" == "hyprland" ]]; then
   check "SDDM enabled"                      test -L "$CHECK/etc/systemd/system/display-manager.service"
-  check "Hyprland config for the user"      grep -q "kb_layout = fr" "$CHECK/home/alice/.config/hypr/hyprland.conf"
+  # A desktop shell preset needs the Lua form of the config (hyprland.lua; hyprland.conf is not written then).
+  HYPR_FILE=hyprland.conf; [[ -n "$DOTFILES" && "$DOTFILES" != none ]] && HYPR_FILE=hyprland.lua
+  # Revo Shell keeps the keyboard layout in its own configs/input.lua, hyprland.lua only requires it.
+  [[ "$DOTFILES" == revo ]] && HYPR_FILE=configs/input.lua
+  check "Hyprland config for the user"      grep -qE 'kb_layout[[:space:]]*=[[:space:]]*"?fr"?' "$CHECK/home/alice/.config/hypr/$HYPR_FILE"
   # Compare numeric ids: the test container does not know the user "alice" by name.
-  check "Hyprland config owned by the user" test "$(stat -c %u "$CHECK/home/alice/.config/hypr/hyprland.conf")" = "$(awk -F: '$1=="alice"{print $3}' "$CHECK/etc/passwd")"
+  check "Hyprland config owned by the user" test "$(stat -c %u "$CHECK/home/alice/.config/hypr/$HYPR_FILE")" = "$(awk -F: '$1=="alice"{print $3}' "$CHECK/etc/passwd")"
   check "Hyprland session is installed"     test -s "$CHECK/usr/share/wayland-sessions/hyprland.desktop"
   check "keyboard layout for the display manager" grep -q '"XkbLayout" "fr"' "$CHECK/etc/X11/xorg.conf.d/00-keyboard.conf"
 fi
@@ -341,6 +385,7 @@ PY
   check "finish script turns Fast Startup and hibernation off" grep -q 'powercfg.exe /hibernate off' "$FINISH"
   check "finish script reads the firmware product key without logging it" bash -c "grep -q OA3xOriginalProductKey '$FINISH' && ! grep -E '^\s*Say.*firmwareKey' '$FINISH'"
   check "answer file turns Fast Startup off"   grep -q 'HiberbootEnabled' "$SETUP/archinstall/unattend-0.xml"
+  source /src/scripts/integration/checks-drivers.sh
   # Keep the generated scripts: the PowerShell driver parses them with the real PowerShell parser.
   if [[ -n "$EVIDENCE_DIR" ]]; then
     mkdir -p "$EVIDENCE_DIR/generated"
@@ -409,6 +454,189 @@ if [[ "$AUR_HELPER" != "none" ]]; then
   check "base-devel and git were installed for makepkg" bash -c "arch-chroot '$CHECK' pacman -Q base-devel git >/dev/null"
 fi
 
+log "Developer tools and applications (dev_groups='${DEV_GROUPS:-}' apps='${APPS:-}' desktop=$DESKTOP aur_break=${AUR_BREAK:-no})"
+# An independent oracle: the package names the installer is expected to install (NOT read from extras.py).
+declare -A DEV_PKGS=(
+  [languages]="git nodejs npm pnpm python python-pip python-pipx python-virtualenv go rust cmake ninja gdb"
+  [cli]="github-cli openssh jq ripgrep fd fzf tmux neovim httpie"
+  [docker]="docker docker-compose"
+)
+EXPECT_OFFICIAL=(); EXPECT_AUR=()
+for group in ${DEV_GROUPS//,/ }; do read -ra _group_pkgs <<<"${DEV_PKGS[$group]}"; EXPECT_OFFICIAL+=("${_group_pkgs[@]}"); done
+if [[ "$DESKTOP" == hyprland ]]; then
+  for app in ${APPS//,/ }; do
+    case "$app" in
+      vscodium)  EXPECT_AUR+=(vscodium-bin) ;;
+      postman)   EXPECT_AUR+=(postman-bin) ;;
+      librewolf) EXPECT_OFFICIAL+=(librewolf) ;;
+    esac
+  done
+fi
+echo "      expected from the official repositories: ${EXPECT_OFFICIAL[*]:-nothing}"
+echo "      expected from the AUR:                   ${EXPECT_AUR[*]:-nothing}"
+chroot_pkg_absent() { local p; for p in "$@"; do if arch-chroot "$CHECK" pacman -Q "$p" >/dev/null 2>&1; then echo "$p is installed" >&2; return 1; fi; done; }
+
+for pkg in ${EXPECT_OFFICIAL[@]+"${EXPECT_OFFICIAL[@]}"}; do
+  check "official package $pkg is installed" arch-chroot "$CHECK" pacman -Q "$pkg"
+done
+for bin_pkg in node:nodejs npm:npm python:python pip:python-pip go:go cargo:rust cmake:cmake rg:ripgrep nvim:neovim gh:github-cli docker:docker; do
+  if printf '%s\n' ${EXPECT_OFFICIAL[@]+"${EXPECT_OFFICIAL[@]}"} | grep -qx "${bin_pkg##*:}"; then
+    # Inside the chroot: several of these are ABSOLUTE symlinks (/usr/bin/go -> /usr/lib/go/bin/go) that do not
+    # resolve from the container.
+    check "${bin_pkg%%:*} is in the installed system" arch-chroot "$CHECK" test -x "/usr/bin/${bin_pkg%%:*}"
+  fi
+done
+check "alice is in the wheel group" grep -qE '^wheel:[^:]*:[0-9]+:.*\balice\b' "$CHECK/etc/group"
+if [[ ",$DEV_GROUPS," == *",docker,"* ]]; then
+  check "alice is in the docker group" grep -qE '^docker:[^:]*:[0-9]+:.*\balice\b' "$CHECK/etc/group"
+  check "docker.service is enabled" test -L "$CHECK/etc/systemd/system/multi-user.target.wants/docker.service"
+else
+  check "alice is not in a docker group" bash -c "! grep -qE '^docker:[^:]*:[0-9]+:.*\balice\b' '$CHECK/etc/group'"
+fi
+check "no temporary sudoers file is left" bash -c "! test -e '$CHECK/etc/sudoers.d/99-archinstall-aur'"
+
+if (( ${#EXPECT_AUR[@]} )) && [[ -z "$AUR_BREAK" ]]; then
+  check "the AUR helper yay-bin was installed on its own (no helper was chosen)" arch-chroot "$CHECK" pacman -Q yay-bin
+  check "yay starts as the user" shows yay arch-chroot "$CHECK" runuser -l alice -c "yay --version"
+  check "the installer says the helper works" grep -q "The AUR helper yay works (installed from yay-bin)" /tmp/installer.log
+  check "no fallback warning for yay" bash -c "! grep -q 'WARNING: yay' /tmp/installer.log"
+  check "base-devel and git were installed for makepkg" arch-chroot "$CHECK" pacman -Q base-devel git
+  check "the wheel rule is the only sudoers.d file left" bash -c "[[ \$(ls '$CHECK/etc/sudoers.d' | tr '\n' ' ') == '10-wheel ' ]]"
+  for pkg in "${EXPECT_AUR[@]}"; do
+    check "AUR package $pkg is installed" arch-chroot "$CHECK" pacman -Q "$pkg"
+    check "the installer says $pkg was installed from the AUR" grep -q "$pkg installed from the AUR" /tmp/installer.log
+  done
+  if [[ " ${EXPECT_AUR[*]} " == *" vscodium-bin "* ]]; then
+    check "codium is installed" test -x "$CHECK/usr/bin/codium"
+    CODIUM_OUT="$(arch-chroot "$CHECK" runuser -l alice -c 'codium --version' 2>&1 | head -n 3 || true)"
+    echo "      codium --version (informative, no display here): ${CODIUM_OUT//$'\n'/ | }"
+    # The wrapper script refuses to run when /proc/version says WSL, which is what Docker Desktop's kernel
+    # is: a test-environment artefact. Run VSCodium's own CLI (Electron as plain Node) instead.
+    CODIUM_FILES="$(arch-chroot "$CHECK" pacman -Ql vscodium-bin 2>/dev/null | awk '{print $2}')"
+    CODIUM_CLI="$(grep -m1 'resources/app/out/cli\.js$' <<<"$CODIUM_FILES" || true)"
+    CODIUM_ELECTRON="$(grep -E '/(codium|vscodium)$' <<<"$CODIUM_FILES" | grep -v '/bin/' | head -n 1 || true)"
+    echo "      wrapper:  $(head -c 300 "$CHECK/usr/bin/codium" | tr '\n' ' ')"
+    echo "      electron: ${CODIUM_ELECTRON:-not found}   cli: ${CODIUM_CLI:-not found}"
+    if [[ -n "$CODIUM_CLI" && -n "$CODIUM_ELECTRON" ]]; then
+      CODIUM_REAL="$(arch-chroot "$CHECK" runuser -l alice -c "ELECTRON_RUN_AS_NODE=1 $CODIUM_ELECTRON $CODIUM_CLI --version" 2>&1 | head -n 3 || true)"
+      echo "      VSCodium's own CLI --version: ${CODIUM_REAL//$'\n'/ | }"
+      check "VSCodium's own CLI answers --version (headless)" grep -qE '^[0-9]+\.[0-9]+\.[0-9]+' <<<"$CODIUM_REAL"
+    fi
+  fi
+  if [[ " ${EXPECT_AUR[*]} " == *" postman-bin "* ]]; then
+    check "postman is installed (launcher or /opt/postman)" bash -c "test -e '$CHECK/usr/bin/postman' || test -d '$CHECK/opt/postman'"
+    echo "      postman files: $(arch-chroot "$CHECK" pacman -Ql postman-bin 2>/dev/null | wc -l) paths, $(arch-chroot "$CHECK" pacman -Qi postman-bin 2>/dev/null | awk -F': *' '/Installed Size/{print $2}')"
+  fi
+elif [[ -z "$AUR_BREAK" && "$AUR_HELPER" == none && -z "$DOTFILES" ]]; then
+  # Nothing needs the AUR (a desktop shell preset does: its checks are in checks-dotfiles-<id>.sh): no helper, no build tools, no AUR access, no temporary sudo rule.
+  check "no AUR helper was installed" chroot_pkg_absent yay yay-bin paru paru-bin
+  check "base-devel was not installed" chroot_pkg_absent base-devel
+  check "the AUR was never contacted" bash -c "! grep -q 'aur.archlinux.org' /tmp/installer.log"
+  check "the temporary sudoers file was never written" bash -c "! grep -q '99-archinstall-aur' /tmp/installer.log"
+fi
+if [[ "$DESKTOP" != hyprland && -n "$APPS" ]]; then
+  check "without a desktop the applications are not installed" chroot_pkg_absent librewolf vscodium-bin postman-bin
+fi
+
+if [[ -n "$AUR_BREAK" ]]; then
+  check "the AUR was made unreachable for the installed system" test -s /tmp/aur-break.log
+  check "the installer exit code was 0" test "$INSTALLER_STATUS" -eq 0
+  check "the failing helper is logged as a warning" grep -q "WARNING: yay-bin could not be installed or does not start" /tmp/installer.log
+  check "the skipped applications are named in a warning" grep -q "WARNING: yay could not be installed, so the AUR packages (${EXPECT_AUR[*]}) are skipped" /tmp/installer.log
+  check "the AUR applications are not installed" chroot_pkg_absent ${EXPECT_AUR[@]+"${EXPECT_AUR[@]}"}
+  if [[ "$AUR_BREAK" == early ]]; then
+    for pkg in "${EXPECT_AUR[@]}"; do
+      check "the check before the erase warns that $pkg cannot be found" grep -q "WARNING: the AUR package $pkg could not be found; it will be skipped" /tmp/installer.log
+    done
+  fi
+  check "the installer log says no application was installed from the AUR" bash -c "! grep -q 'installed from the AUR' /tmp/installer.log"
+  check "no temporary sudoers file is left" bash -c "! test -e '$CHECK/etc/sudoers.d/99-archinstall-aur'"
+fi
+
+# With no extras asked for, the package list must be exactly what it was before the extras existed.
+PACSTRAP_LINE="$(grep -m1 '^\$ pacstrap -K /mnt ' /tmp/installer.log || true)"
+if [[ -z "$DEV_GROUPS$APPS" && "$DESKTOP" == minimal && "$STRATEGY" == shim && "$FS" == ext4 && -z "$LUKS" \
+      && "$AUR_HELPER" == none && -z "$LAPTOP" ]]; then
+  UCODE=""
+  grep -q GenuineIntel /proc/cpuinfo && UCODE=" intel-ucode"
+  grep -q AuthenticAMD /proc/cpuinfo && UCODE=" amd-ucode"
+  BASELINE="\$ pacstrap -K /mnt base linux linux-firmware${UCODE} grub efibootmgr networkmanager sudo nano man-db ntfs-3g dosfstools zram-generator sbsigntools openssl mokutil"
+  echo "      baseline: $BASELINE"
+  echo "      actual:   $PACSTRAP_LINE"
+  check "with no extras the pacstrap command line is exactly the one of before" test "$PACSTRAP_LINE" = "$BASELINE"
+fi
+
+log "Timings and sizes"
+python - "$CHECK" <<'PY' | tee /tmp/extras-timings.txt
+"""Phase timings from the timestamped installer output, and the size of what pacstrap installs."""
+import re, subprocess, sys
+
+rows = []
+for line in open("/tmp/installer.ts.log", errors="replace"):
+    stamp, _, text = line.rstrip("\n").partition("\t")
+    if stamp.isdigit():
+        rows.append((int(stamp), text))
+
+def first(pred, start=0):
+    return next((i for i in range(start, len(rows)) if pred(rows[i][1])), None)
+
+def phase(name, start_pred, end_pred):
+    i = first(start_pred)
+    j = first(end_pred, i or 0) if i is not None else None
+    if i is None or j is None:
+        print(f"  {name:<42} (not seen)")
+    else:
+        print(f"  {name:<42} {rows[j][0] - rows[i][0]:>5} s   (t={rows[i][0]} .. {rows[j][0]})")
+
+print("Phase timings (seconds since the start of the test script):")
+phase("pacstrap (system + extras)", lambda s: s.startswith("$ pacstrap -K /mnt"), lambda s: s.startswith("> write /mnt/etc/fstab"))
+phase("yay-bin (the helper)", lambda s: "yay-bin.git" in s and s.startswith("$ "), lambda s: "The AUR helper yay works" in s or "WARNING: yay" in s)
+for pkg in ("vscodium-bin", "postman-bin"):
+    phase(f"yay -S {pkg}", lambda s, p=pkg: s.startswith("$ ") and f"yay -S --needed --noconfirm {p}" in s,
+          lambda s, p=pkg: f"{p} installed from the AUR" in s or f"WARNING: {p} could not" in s)
+print(f"  {'installer total':<42} {rows[-1][0] - rows[0][0] if rows else 0:>5} s")
+
+# What pacstrap installs: pacman prints one table row per package (VerbosePkgLists):
+#   repo/name  version  installed size  download size
+log = open("/tmp/installer.log", errors="replace").read().splitlines()
+start = next((i for i, l in enumerate(log) if l.startswith("$ pacstrap -K /mnt")), None)
+units = {"B": 1, "KiB": 1024, "MiB": 1024**2, "GiB": 1024**3}
+row = re.compile(r"^(?:core|extra|multilib)/(\S+)\s+(\S+)\s+([\d.,]+) (B|KiB|MiB|GiB)\s+([\d.,]+) (B|KiB|MiB|GiB)\s*$")
+packages, printed = [], []
+if start is not None:
+    for line in log[start:]:
+        m = row.match(line)
+        if m:
+            size = lambda v, u: float(v.replace(",", ".")) * units[u]
+            packages.append((m.group(1), m.group(2), size(m.group(3), m.group(4)), size(m.group(5), m.group(6))))
+        elif re.match(r"^Total (Download|Installed) Size:", line):
+            printed.append(re.sub(r"\s+", " ", line))
+        elif line.startswith(":: Proceed with installation"):
+            break
+print(f"  packages in the pacstrap transaction: {len(packages)}")
+for line in printed:
+    print("  pacman says: " + line + ("  (the whole transaction: what an empty package cache has to download)" if "Download" in line else ""))
+print(f"  sum of the download column: {sum(p[3] for p in packages) / 1024**2:.0f} MiB;"
+      f" sum of the installed-size column: {sum(p[2] for p in packages) / 1024**2:.0f} MiB")
+open("/tmp/extras-pacstrap-packages.txt", "w").write(
+    "".join(f"{n}\t{v}\t{inst / 1024**2:.2f}\t{dl / 1024**2:.2f}\n" for n, v, inst, dl in packages))
+PY
+USED_BYTES="$(df -B1 --output=used "$CHECK" | tail -n 1 | tr -d ' ')"
+echo "  disk used on the installed root file system: $((USED_BYTES / 1048576)) MiB" | tee -a /tmp/extras-timings.txt
+{
+  echo "  where the space goes (MiB, biggest first):"
+  du -sm "$CHECK/usr" "$CHECK/opt" "$CHECK/var/cache" "$CHECK/var/lib" "$CHECK/home/alice" "$CHECK/root" 2>/dev/null | sort -rn | sed "s|$CHECK||; s|^|    |"
+  if [[ -d "$CHECK/home/alice/.cache" ]]; then
+    echo "  inside alice's ~/.cache (AUR builds leave their sources and built packages there):"
+    du -sm "$CHECK"/home/alice/.cache/* 2>/dev/null | sort -rn | head -n 6 | sed "s|$CHECK||; s|^|    |" || true  # an empty cache is fine
+  fi
+  echo "  built AUR packages left behind: $(find "$CHECK/home/alice" -name '*.pkg.tar.*' 2>/dev/null | wc -l) file(s), $(find "$CHECK/home/alice" -name '*.pkg.tar.*' -print0 2>/dev/null | du -mc --files0-from=- 2>/dev/null | tail -n 1 | cut -f1) MiB"
+} | tee -a /tmp/extras-timings.txt
+if [[ -n "$EVIDENCE_DIR" ]]; then
+  cp /tmp/extras-timings.txt /tmp/extras-pacstrap-packages.txt /tmp/installer.ts.log "$EVIDENCE_DIR/" 2>/dev/null || true
+  cp /tmp/aur-break.log "$EVIDENCE_DIR/" 2>/dev/null || true
+fi
+
 if [[ -n "$LAPTOP" ]]; then
   log "Laptop extras"
   for pkg in power-profiles-daemon python-gobject bluez bluez-utils upower sof-firmware nvidia-prime nvidia-open nvidia-utils intel-media-driver vulkan-intel mesa brightnessctl; do
@@ -445,10 +673,12 @@ if [[ -n "$LAPTOP" ]]; then
   check "the Wi-Fi profile has a valid uuid" bash -c "grep -qE '^uuid=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\$' '$NMFILE'"
   check "the Wi-Fi passphrase is not in the installer output" bash -c "! grep -q 'wifi-test-pass-2026' /tmp/installer.log"
   check "the installer says the network is kept" bash -c "grep -q 'is kept for the installed system' /tmp/installer.log"
-  HYPR="$CHECK/home/alice/.config/hypr/hyprland.conf"
+  HYPR="$CHECK/home/alice/.config/hypr/${HYPR_FILE:-hyprland.conf}"
+  [[ "$DOTFILES" == caelestia ]] && HYPR="$CHECK/home/alice/.config/hypr/hyprland/keybinds.lua"  # the dots' own binds
+  [[ "$DOTFILES" == revo ]] && HYPR="$CHECK/home/alice/.config/hypr/configs/keybinds.lua"  # Revo Shell's own binds
   check "Hyprland config has the brightness keys" grep -q 'XF86MonBrightnessUp' "$HYPR"
   check "Hyprland config has the volume keys" grep -q 'XF86AudioRaiseVolume' "$HYPR"
-  check "Hyprland config has tap-to-click" grep -q 'tap-to-click = true' "$HYPR"
+  [[ "$DOTFILES" == caelestia || "$DOTFILES" == revo ]] || check "Hyprland config has tap-to-click" grep -qE 'tap[-_]to[-_]click = true' "$HYPR"  # Caelestia leaves Hyprland's default (on)
   # Does the generated configuration load in the installed Hyprland? The version decides how.
   HYPR_VERSION="$(arch-chroot "$CHECK" pacman -Q hyprland 2>&1 | head -n 1 || true)"
   echo "      installed: ${HYPR_VERSION:-unknown}"
@@ -456,7 +686,7 @@ if [[ -n "$LAPTOP" ]]; then
   OWNER="$(awk -F: '$1=="alice"{print $3":"$4}' "$CHECK/etc/passwd")"
   chown "$OWNER" "$CHECK/tmp/xdg-test"; chmod 700 "$CHECK/tmp/xdg-test"
   HYPR_OUT="$(arch-chroot "$CHECK" runuser -u alice -- env XDG_RUNTIME_DIR=/tmp/xdg-test HOME=/home/alice \
-      Hyprland --verify-config -c /home/alice/.config/hypr/hyprland.conf 2>&1 || true)"
+      Hyprland --verify-config -c "/home/alice/.config/hypr/${HYPR_FILE:-hyprland.conf}" 2>&1 || true)"
   echo "$HYPR_OUT" | sed 's/^/      hyprland: /' | head -n 25
   if [[ -n "$EVIDENCE_DIR" ]]; then
     echo "$HYPR_VERSION" >"$EVIDENCE_DIR/hyprland-verify-config.txt"; echo "$HYPR_OUT" >>"$EVIDENCE_DIR/hyprland-verify-config.txt"
@@ -484,6 +714,10 @@ if [[ -n "$EVIDENCE_DIR" ]]; then
   cp /tmp/answers.json "$EVIDENCE_DIR/answers-redacted.json"
   sed -i -E 's/("[a-z_]*(password|passphrase)": )"[^"]*"/\1"***"/' "$EVIDENCE_DIR/answers-redacted.json"
 fi
+if [[ -n "$DOTFILES" ]]; then
+  # shellcheck disable=SC1090
+  source "/src/scripts/integration/checks-dotfiles-$DOTFILES.sh"
+fi
 echo "duration_seconds=$((SECONDS - STARTED_AT))"
 
 if [[ -n "${BOOT_TEST:-}" ]]; then
@@ -493,4 +727,4 @@ if [[ -n "${BOOT_TEST:-}" ]]; then
 fi
 
 if (( FAILED )); then fail "some checks failed"; fi
-log "ALL CHECKS PASSED (strategy=$STRATEGY fs=$FS desktop=$DESKTOP luks=${LUKS:-no} home=${HOME_PART:-no} shared=${SHARED:-no} aur=$AUR_HELPER laptop=${LAPTOP:-no} windows=${WINDOWS_ISO:+yes}${DOWNLOAD_SOURCE:+(download)})"
+log "ALL CHECKS PASSED (strategy=$STRATEGY fs=$FS desktop=$DESKTOP luks=${LUKS:-no} home=${HOME_PART:-no} shared=${SHARED:-no} aur=$AUR_HELPER laptop=${LAPTOP:-no} dev=${DEV_GROUPS:-no} apps=${APPS:-no} aurbreak=${AUR_BREAK:-no} windows=${WINDOWS_ISO:+yes}${DOWNLOAD_SOURCE:+(download)})"

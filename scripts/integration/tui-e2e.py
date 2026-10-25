@@ -97,6 +97,7 @@ class Vm:
                  memory: int = int(os.environ.get("TUI_MEMORY", "6144"))) -> None:
         self.name, self.disk, self.vars_file, self.live, self.memory = name, disk, vars_file, live, memory
         self.extra_cmdline = extra_cmdline
+        self.overlay: Path | None = None
         self.monitor_path = WORK / f"{name}.mon"
         self.log_path = WORK / f"{name}.serial.log"
         self.proc: subprocess.Popen | None = None
@@ -123,6 +124,9 @@ class Vm:
                      "-device", "virtio-blk-pci,drive=usb",
                      "-kernel", str(WORK / "vmlinuz-linux"), "-initrd", str(WORK / "initramfs-linux.img"),
                      "-append", f"{shipped_cmdline()} {self.console_arg()} cow_spacesize=3G {self.extra_cmdline}".strip()]
+            if self.overlay:
+                args += ["-drive", f"file={self.overlay},format=raw,if=none,id=inst,readonly=on",
+                         "-device", "virtio-blk-pci,drive=inst"]
         if CONSOLE == "hvc0":
             args += ["-serial", "none", "-chardev", "stdio,id=con0,signal=off",
                      "-device", "virtio-serial-pci", "-device", "virtconsole,chardev=con0"]
@@ -285,6 +289,7 @@ class Wizard:
         self.vm = vm
         self.snapshots = 0
         self.prefix = ""
+        self.total = 14
 
     # -- what is on screen ---------------------------------------------------------------------
 
@@ -315,7 +320,19 @@ class Wizard:
         return self.vm.wait_screen(pattern, timeout)
 
     def wait_step(self, number: int, timeout: float = 30) -> bool:
-        return self.vm.wait_screen(rf"step {number} of 13", timeout)
+        return self.vm.wait_screen(rf"step {number} of \d+", timeout)
+
+    def read_total(self) -> int:
+        match = re.search(r"step \d+ of (\d+)", self.vm.screen_text())
+        return int(match.group(1)) if match else self.total
+
+    def n(self, name: str) -> int:
+        """The step number of a screen, whatever the number of screens (the Extras screen came after Software)."""
+        names = ["welcome", "region", "network", "disk", "layout", "accounts", "storage", "software", "extras",
+                 "windows", "winaccount", "secureboot", "summary", "install"]
+        if self.total < 14:
+            names.remove("extras")
+        return names.index(name) + 1
 
     def snapshot(self, name: str) -> None:
         self.snapshots += 1
@@ -499,6 +516,59 @@ class Wizard:
                         return True
         return False
 
+    def checklist(self, header: str) -> list[dict]:
+        """The checkboxes under a section header: [{label, ticked, y, bg}] (a ticked box has a green X)."""
+        lines = self.vm.lines()
+        start = next((i for i, line in enumerate(lines) if line.strip(" │").lower() == header.lower()), None)
+        items: list[dict] = []
+        if start is None:
+            return items
+        for y in range(start + 1, min(start + 16, ROWS)):
+            line = lines[y]
+            if "▐X▌" in line:
+                x = line.index("▐X▌")
+                items.append({"label": option_label(line), "ticked": self.vm.cell(y, x + 1).fg == GREEN, "y": y,
+                              "bg": self.vm.cell(y, x + 4).bg})
+            elif items and "▁▁▁▁" in line:
+                break
+        return items
+
+    @staticmethod
+    def checklist_cursor(items: list[dict]) -> int | None:
+        """The highlighted item: the one whose background differs from all the others."""
+        if len(items) < 2:
+            return 0 if items else None
+        backgrounds = [item["bg"] for item in items]
+        common = max(set(backgrounds), key=backgrounds.count)
+        odd = [k for k, bg in enumerate(backgrounds) if bg != common]
+        return odd[0] if len(odd) == 1 else None
+
+    def toggle_item(self, header: str, label_start: str) -> bool:
+        """Focus the list under `header`, move to the item and press Space. True when its tick changed."""
+        if not self.goto(header):
+            return False
+        target = None
+        for _ in range(8):
+            items = self.checklist(header)
+            target = next((k for k, item in enumerate(items) if item["label"].lower().startswith(label_start.lower())), None)
+            if target is None:
+                return False
+            cursor = self.checklist_cursor(items)
+            if cursor == target:
+                break
+            self.vm.keys("down" if cursor is None or cursor < target else "up")
+        before = self.checklist(header)[target]["ticked"]
+        self.vm.keys("space", pause=0.5)
+        return self.checklist(header)[target]["ticked"] != before
+
+    def summary_text(self, confirm_caption: str) -> str:
+        """The Summary does not fit on the screen any more: what is visible, then what is visible once the confirmation
+        field (at the bottom of the scrolling body) has the focus."""
+        first = self.vm.screen_text()
+        self.goto(confirm_caption)
+        time.sleep(0.5)
+        return first + chr(10) + self.vm.screen_text()
+
     def toggle_switch(self, label: str) -> bool:
         if not self.goto_switch(label):
             return False
@@ -519,18 +589,39 @@ def prepare_work(disk_gib: int = 100) -> tuple[Path, Path]:
     return disk, vars_file
 
 
+REPO_INSTALLER = os.environ.get("TUI_REPO_INSTALLER", "0") == "1"
+
+
+def make_overlay() -> Path:
+    """A tar of the installer/ folder and of the launcher of the repository (attached as a read-only disk)."""
+    tar = WORK / "inst.tar"
+    tar.unlink(missing_ok=True)
+    subprocess.run(["tar", "--exclude=__pycache__", "-C", "/src/installer", "-cf", str(tar), "dualboot_installer"], check=True)
+    subprocess.run(["tar", "-C", "/src/profile/airootfs/usr/local/bin", "-rf", str(tar), "archinstall-launcher"], check=True)
+    return tar
+
+
 def boot_live(name: str = "tui", extra: str = os.environ.get("TUI_KERNEL_EXTRA", ""), disk_gib: int = 100) -> Vm:
     disk, vars_file = prepare_work(disk_gib)
     vm = Vm(name, disk=disk, vars_file=vars_file, live=True, extra_cmdline=extra)
+    if REPO_INSTALLER:
+        vm.overlay = make_overlay()
     vm.start()
     if not vm.login():
         print(vm.text()[-2500:])
         raise SystemExit("the live system did not give a root shell")
+    if REPO_INSTALLER:
+        # The overlay is the last virtio disk; its content replaces the installer (and the launcher) of the ISO.
+        rc, out = vm.shell("mkdir -p /tmp/inst && tar -xf \"/dev/$(ls /sys/block | grep '^vd' | sort | tail -1)\" -C /tmp/inst "
+                           "&& mount --bind /tmp/inst/dualboot_installer /opt/archinstall/dualboot_installer "
+                           "&& mount --bind /tmp/inst/archinstall-launcher /usr/local/bin/archinstall-launcher "
+                           "&& echo REPO-INSTALLER-MOUNTED", 60)
+        check("REPO-INSTALLER-MOUNTED" in out, "Live: the installer/ folder of the repository replaces the one of the ISO", out[-200:])
     return vm
 
 
-def start_wizard(vm: Vm) -> None:
-    vm.send(f"stty echo rows {ROWS} cols {COLS}; export TERM=linux; archinstall-launcher\r")
+def start_wizard(vm: Vm, partial: bool = False) -> None:
+    vm.send(f"stty echo rows {ROWS} cols {COLS}; export TERM=linux; archinstall-launcher{' --partial' if partial else ''}\r")
     time.sleep(1)
 
 
@@ -591,10 +682,12 @@ def ctl(request: dict) -> dict:
 
 
 def scenario_wizard(vm: Vm, w: Wizard) -> bool:
-    """Walks the 13 screens. Returns True when the install screen was reached and finished."""
+    """Walks the screens (13 before the Extras screen existed, 14 now). True when the Summary was confirmed."""
     # ---- 1. Welcome ----------------------------------------------------------------------------
     log("1. Welcome")
-    check(w.wait_step(1, 30), "the wizard starts on step 1 of 13")
+    check(w.wait_step(1, 30), "the wizard starts on step 1")
+    w.total = w.read_total()
+    check(w.total in (13, 14), f"the wizard has {w.total} screens")
     w.snapshot("welcome")
     check(w.has(r"OK\s+UEFI firmware"), "Welcome: UEFI is detected")
     check(w.has(r"Windows 11 image\s+Included in this installer"), "Welcome: the included Windows 11 image is listed")
@@ -710,9 +803,9 @@ def scenario_wizard(vm: Vm, w: Wizard) -> bool:
     w.snapshot("software")
 
     # Back navigation. First what was saved with Next must survive a round trip.
-    check(w.next(9), "Software -> Windows image (saves the Software choices)")
+    check(w.next(9), "Software -> next screen (saves the Software choices)")
     vm.keys("esc", pause=1.0)
-    check(w.wait_step(8, 15), "Back: Escape returns from the Windows image screen to Software")
+    check(w.wait_step(8, 15), "Back: Escape returns from the next screen to Software")
     labels, selected, _ = w.radio_state("Desktop")
     check(selected is not None and labels[selected].startswith("Minimal"),
           "Back: a choice saved with Next (minimal desktop) is still there after Next, Back")
@@ -737,7 +830,9 @@ def scenario_wizard(vm: Vm, w: Wizard) -> bool:
     seen = w.vm.screen_text()
     if "quit" in seen.lower() or "ctrl+q" in seen.lower():
         note("Ctrl+C shows a hint to quit with Ctrl+Q (Textual's default); the wizard keeps running")
-    check(w.next(9), "Software -> Windows image")
+    check(w.next(9), "Software -> " + ("Extras" if w.total == 14 else "Windows image"))
+    if w.total == 14:
+        extras_minimal_empty(vm, w, "")
 
     # ---- 9. Windows image -----------------------------------------------------------------------------------
     log("9. Windows image")
@@ -751,20 +846,20 @@ def scenario_wizard(vm: Vm, w: Wizard) -> bool:
     check(w.choose("Where does the ISO come from", "link I paste"), "Windows: the pasted-link source can be chosen")
     check(w.wait(r"Download link of the Windows 11 ISO", 5), "Windows: the link field appears")
     w.press("Next", expect_change=False)
-    check(w.step() == 9 and "Paste the download link" in w.error(), "Windows: an empty link is refused", w.error())
+    check(w.step() == w.n("windows") and "Paste the download link" in w.error(), "Windows: an empty link is refused", w.error())
     w.fill("Download link", "http://example.com/win.iso")
     w.press("Next", expect_change=False)
-    check(w.step() == 9 and "https://" in w.error(), "Windows: an http:// link is refused", w.error())
+    check(w.step() == w.n("windows") and "https://" in w.error(), "Windows: an http:// link is refused", w.error())
     check(w.choose("Where does the ISO come from", "included"), "Windows: back to the included ISO")
     check(w.has(r"set by the included ISO"), "Windows: the fixed language line is back")
     w.snapshot("windows-image")
-    check(w.next(10), "Windows image -> Windows account")
+    check(w.next(w.n("winaccount")), "Windows image -> Windows account")
 
     # ---- 10. Windows account -----------------------------------------------------------------------------------
     log("10. Windows account")
     w.fill("Password", "win-pw")
     w.fill("Confirm the password", "win-pw")
-    refused(w, "Windows account", 10, [
+    refused(w, "Windows account", w.n("winaccount"), [
         ("Computer name", "WINDOWS-TEST-PC-01", "limited to 15 characters", "a computer name over 15 characters"),
         ("Computer name", "WINTEST", "", ""),
         ("User name", "Administrator", "reserved by Windows", "the reserved user name Administrator"),
@@ -775,11 +870,11 @@ def scenario_wizard(vm: Vm, w: Wizard) -> bool:
     w.fill("Password", "win-pw")
     w.fill("Confirm the password", "win-other")
     w.press("Next", expect_change=False)
-    check(w.step() == 10 and "do not match" in w.error(), "Windows account: mismatching passwords are refused", w.error())
+    check(w.step() == w.n("winaccount") and "do not match" in w.error(), "Windows account: mismatching passwords are refused", w.error())
     w.fill("Confirm the password", "win-pw")
     check(not any(secret in vm.screen_text() for secret in SECRETS), "Windows account: no password is shown")
     w.snapshot("windows-account")
-    check(w.next(11), "Windows account -> Secure Boot")
+    check(w.next(w.n("secureboot")), "Windows account -> Secure Boot")
 
     # ---- 11. Secure Boot ----------------------------------------------------------------------------------------
     log("11. Secure Boot")
@@ -801,7 +896,7 @@ def scenario_wizard(vm: Vm, w: Wizard) -> bool:
     vm.keys("enter", pause=1.0)
     if w.has(r"Strategy that will be used: Custom keys with sbctl"):
         w.press("Next", expect_change=False)
-        check(w.step() == 11 and "TPM" in w.error(), "Secure Boot: sbctl is refused by the wizard without a TPM", w.error())
+        check(w.step() == w.n("secureboot") and "TPM" in w.error(), "Secure Boot: sbctl is refused by the wizard without a TPM", w.error())
         check(w.goto("Strategy"), "Secure Boot: focus the list a third time")
         vm.keys("enter", pause=1.0)
         vm.keys("down", pause=0.5)
@@ -810,16 +905,17 @@ def scenario_wizard(vm: Vm, w: Wizard) -> bool:
         note("Secure Boot: could not select sbctl with the keyboard to test its refusal")
     check(w.has(r"Strategy that will be used: shim"), "Secure Boot: shim + MOK is selected again")
     w.press("Next", expect_change=False)
-    check(w.step() == 11 and "enrollment password" in w.error().lower(), "Secure Boot: an empty enrollment password is refused",
+    check(w.step() == w.n("secureboot") and "enrollment password" in w.error().lower(), "Secure Boot: an empty enrollment password is refused",
           w.error())
     w.fill("Enrollment password", "Abcd1234")
     w.fill("Confirm the enrollment password", "Abcd1234")
     w.snapshot("secureboot-shim")
-    check(w.next(12), "Secure Boot -> Summary")
+    check(w.next(w.n("summary")), "Secure Boot -> Summary")
 
     # ---- 12. Summary ---------------------------------------------------------------------------------------------
     log("12. Summary")
-    summary = vm.screen_text()
+    w.snapshot("summary-top")
+    summary = w.summary_text("Type /dev/vda to confirm")
     check("/dev/vda" in summary, "Summary: names the target disk")
     check(re.search(r"Windows\s+70\.0|Windows\s+64\.0", summary) is not None, "Summary: lists the partitions")
     check("btrfs" in summary, "Summary: shows the btrfs choice")
@@ -829,12 +925,182 @@ def scenario_wizard(vm: Vm, w: Wizard) -> bool:
           "Summary: shows the linux-lts kernel chosen before the Back/Next round trip")
     check("included in this installer" in summary.lower(), "Summary: says Windows comes from the included ISO")
     check(not any(secret in summary for secret in SECRETS), "Summary: no secret is displayed")
+    if w.total == 14:
+        check(re.search(r"Developer tools\s+none", summary) is not None and re.search(r"Applications\s+none", summary) is not None
+              and re.search(r"Desktop shell\s+none \(no desktop\)", summary) is not None,
+              "Summary: Developer tools none / Applications none / Desktop shell none (no desktop) after an empty choice")
     w.snapshot("summary")
     check(w.fill("Type /dev/vda to confirm", "/dev/sdz"), "Summary: the confirmation field can be reached")
     w.press("Install", expect_change=False)
-    check(w.step() == 12 and "exactly" in w.error().lower(), "Summary: a wrong device path is refused", w.error())
+    check(w.step() == w.n("summary") and "exactly" in w.error().lower(), "Summary: a wrong device path is refused", w.error())
     w.fill("Type /dev/vda to confirm", "/dev/vda")
     return True
+
+
+DEV_LABELS = {"languages": "Languages and build tools", "cli": "Command line helpers", "docker": "Docker and docker-compose"}
+APP_LABELS = {"vscodium": "VSCodium", "librewolf": "LibreWolf", "postman": "Postman"}
+AUR_NOTE_BOTH = "VSCodium and Postman will be built from the AUR with yay on the installed system: a few minutes."
+
+
+def _ticks(items: list[dict], labels: dict[str, str]) -> dict[str, bool]:
+    found: dict[str, bool] = {}
+    for item in items:
+        for key, label in labels.items():
+            if item["label"].startswith(label):
+                found[key] = item["ticked"]
+    return found
+
+
+def extras_dev(w: Wizard) -> dict[str, bool]:
+    return _ticks(w.checklist("Developer tools"), DEV_LABELS)
+
+
+def extras_apps(w: Wizard) -> dict[str, bool]:
+    return _ticks(w.checklist("Applications"), APP_LABELS)
+
+
+def aur_note(w: Wizard) -> str:
+    """The live note about what is built from the AUR ('' when the screen shows none)."""
+    for line in w.vm.lines():
+        text = line.strip(" │")
+        if "built from the AUR" in text:
+            return text
+    return ""
+
+
+def extras_first_visit(vm: Vm, w: Wizard, tag: str, hypr: bool) -> None:
+    check(w.wait_step(w.n("extras"), 15) and w.title().startswith("Arch Linux: developer tools and applications"),
+          f"{tag}Extras: the screen is step {w.n('extras')} of {w.total}, titled 'Arch Linux: developer tools and applications'",
+          w.title())
+    w.snapshot("extras-first-visit")
+    dev = extras_dev(w)
+    check(dev == {"languages": True, "cli": True, "docker": False},
+          f"{tag}Extras: first visit preselects the recommended developer tools (languages and cli, not docker)", str(dev))
+    if hypr:
+        apps = extras_apps(w)
+        check(apps == {"vscodium": True, "librewolf": True, "postman": True},
+              f"{tag}Extras: first visit preselects VSCodium, LibreWolf and Postman", str(apps))
+        labels, selected, _ = w.radio_state("Desktop shell")
+        check(len(labels) >= 1 and selected == 0 and labels[0].startswith("Default Hyprland setup"),
+              f"{tag}Extras: the desktop shell list starts with the default setup, selected", str(labels))
+        if len(labels) > 1:
+            note(f"Extras: {len(labels) - 1} desktop shell preset(s) besides the default one: {[x[:40] for x in labels[1:]]}")
+        check(aur_note(w) == AUR_NOTE_BOTH, f"{tag}Extras: the AUR note names VSCodium and Postman and the yay fallback", aur_note(w))
+        check(not w.has(r"need an internet connection|go Back to the Network screen"),
+              f"{tag}Extras: no 'needs an internet connection' note (only the default preset exists)")
+    else:
+        check(w.checklist("Applications") == [] and not any(line.strip(" │") == "Desktop shell" for line in vm.lines()),
+              f"{tag}Extras: with the minimal desktop the Applications and Desktop shell sections do not exist")
+        check(w.has(r"Applications and desktop shells need the Hyprland"), f"{tag}Extras: a note says why (needs the Hyprland desktop)")
+        check(aur_note(w) == "", f"{tag}Extras: no AUR note with the minimal desktop")
+
+
+def extras_roundtrip(vm: Vm, w: Wizard, tag: str, dev: dict[str, bool], apps: dict[str, bool] | None) -> None:
+    """Next, Back: what is on the screen must be what it was (an empty choice included)."""
+    check(w.next(w.n("windows")), f"{tag}Extras -> Windows image")
+    vm.keys("esc", pause=1.0)
+    check(w.wait_step(w.n("extras"), 15), f"{tag}Back: Escape returns to the Extras screen")
+    check(extras_dev(w) == dev, f"{tag}Back/Next keeps the developer tools choice", f"{extras_dev(w)} instead of {dev}")
+    if apps is not None:
+        check(extras_apps(w) == apps, f"{tag}Back/Next keeps the applications choice", f"{extras_apps(w)} instead of {apps}")
+
+
+def hmp(vm: Vm, command: str, wait: float = 1.0) -> str:
+    """One command to the QEMU monitor (human protocol), and what it answers."""
+    import socket
+
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.connect(str(vm.monitor_path))
+        sock.settimeout(3)
+        try:
+            sock.recv(4096)
+        except OSError:
+            pass
+        sock.sendall(command.encode() + bytes([10]))
+        time.sleep(wait)
+        try:
+            return sock.recv(65536).decode(errors="replace")
+        except OSError:
+            return ""
+
+
+def extras_presets_and_offline(vm: Vm, w: Wizard, tag: str) -> None:
+    """Hyprland: choose another desktop shell preset (the live note must say it takes long), then look at the screen with
+    no connection (the other presets are disabled and a note says why) and with the connection back."""
+    labels, selected, _ = w.radio_state("Desktop shell")
+    if len(labels) > 1:
+        other = labels[1][:10]
+        check(w.choose("Desktop shell", other), f"{tag}Extras: another desktop shell preset can be chosen while online ({other}...)")
+        note(f"Extras: with the preset '{other}...' chosen the live note reads: {aur_note(w)!r}")
+        check(w.choose("Desktop shell", labels[0][:10]), f"{tag}Extras: back to the default setup")
+        check(not w.has(r"Building the desktop shell"), f"{tag}Extras: the shell warning is gone")
+    # Offline: the screen checks the connection when it opens, so leave and come back with the link down.
+    answer = hmp(vm, "set_link virtio-net-pci.0 off")
+    time.sleep(1)
+    vm.keys("esc", pause=1.0)
+    check(w.wait_step(w.n("software"), 15), f"{tag}Extras: Back to Software with the network link down")
+    check(w.next(w.n("extras")), f"{tag}Software -> Extras with the network link down")
+    check(w.wait(r"need an internet connection|go Back to the Network screen", 20),
+          f"{tag}Extras: offline, a note says the desktop shells need an internet connection", answer[-80:])
+    w.snapshot("extras-offline")
+    check(extras_dev(w) == {"languages": True, "cli": True, "docker": False} and extras_apps(w) == {"vscodium": True, "librewolf": True, "postman": True},
+          f"{tag}Extras: offline, the developer tools and applications are still as they were")
+    if len(labels) > 1:
+        before = w.radio_state("Desktop shell")[1]
+        w.goto("Desktop shell")
+        vm.keys("down", "space", pause=0.5)
+        check(w.radio_state("Desktop shell")[1] == before == 0, f"{tag}Extras: offline, the other presets cannot be selected (disabled)")
+    hmp(vm, "set_link virtio-net-pci.0 on")
+    time.sleep(2)
+    vm.keys("esc", pause=1.0)
+    check(w.next(w.n("extras")), f"{tag}Software -> Extras with the link back up")
+    check(w.wait(r"Default Hyprland setup", 10) and not w.has(r"need an internet connection"),
+          f"{tag}Extras: online again, the note is gone")
+
+
+def extras_minimal_empty(vm: Vm, w: Wizard, tag: str) -> None:
+    """Minimal desktop: defaults, a toggle, then EVERYTHING unticked; Back/Next must keep the empty choice."""
+    log("9. Extras (minimal desktop, everything unticked)")
+    extras_first_visit(vm, w, tag, hypr=False)
+    check(w.toggle_item("Developer tools", "Docker"), f"{tag}Extras: Space ticks Docker")
+    check(extras_dev(w)["docker"] is True, f"{tag}Extras: Docker is now ticked")
+    check(w.toggle_item("Developer tools", "Docker"), f"{tag}Extras: Space unticks Docker again")
+    check(w.toggle_item("Developer tools", "Languages"), f"{tag}Extras: Space unticks Languages and build tools")
+    check(w.toggle_item("Developer tools", "Command line"), f"{tag}Extras: Space unticks Command line helpers")
+    empty = {"languages": False, "cli": False, "docker": False}
+    check(extras_dev(w) == empty, f"{tag}Extras: everything is unticked", str(extras_dev(w)))
+    w.snapshot("extras-empty")
+    extras_roundtrip(vm, w, tag, empty, None)
+    check(w.next(w.n("windows")), f"{tag}Extras (empty) -> Windows image")
+
+
+def extras_defaults_minimal(vm: Vm, w: Wizard, tag: str) -> None:
+    """Minimal desktop, defaults untouched: the recommended developer tools stay selected after Next, Back."""
+    log("9. Extras (minimal desktop, defaults)")
+    extras_first_visit(vm, w, tag, hypr=False)
+    extras_roundtrip(vm, w, tag, {"languages": True, "cli": True, "docker": False}, None)
+    check(w.next(w.n("windows")), f"{tag}Extras (defaults) -> Windows image")
+
+
+def extras_hypr_defaults(vm: Vm, w: Wizard, tag: str, *, toggles: bool = True, offline_test: bool = False) -> None:
+    """Hyprland desktop: first-visit preselection, the live AUR note while toggling, Back/Next, defaults left untouched."""
+    log("9. Extras (Hyprland desktop, recommended defaults)")
+    extras_first_visit(vm, w, tag, hypr=True)
+    if toggles:
+        check(w.toggle_item("Applications", "Postman"), f"{tag}Extras: Space unticks Postman")
+        check(aur_note(w) == "VSCodium will be built from the AUR with yay on the installed system: a few minutes.",
+              f"{tag}Extras: the AUR note follows (VSCodium only)", aur_note(w))
+        check(w.toggle_item("Applications", "VSCodium"), f"{tag}Extras: Space unticks VSCodium")
+        check(aur_note(w) == "", f"{tag}Extras: nothing from the AUR any more: the note is gone (LibreWolf is official)", aur_note(w))
+        check(w.toggle_item("Applications", "VSCodium") and w.toggle_item("Applications", "Postman"),
+              f"{tag}Extras: Space ticks VSCodium and Postman again")
+        check(aur_note(w) == AUR_NOTE_BOTH, f"{tag}Extras: the note is back as at the first visit", aur_note(w))
+        check(extras_apps(w) == {"vscodium": True, "librewolf": True, "postman": True}, f"{tag}Extras: defaults restored")
+    if offline_test:
+        extras_presets_and_offline(vm, w, tag)
+    extras_roundtrip(vm, w, tag, {"languages": True, "cli": True, "docker": False},
+                     {"vscodium": True, "librewolf": True, "postman": True})
+    check(w.next(w.n("windows")), f"{tag}Extras (Hyprland defaults) -> Windows image")
 
 
 def refused(w: Wizard, screen: str, step: int, cases: list[tuple[str, str, str, str]]) -> None:
@@ -866,6 +1132,9 @@ def ticked_gpu_profiles(vm: Vm, w: Wizard) -> list[str]:
     return ticked
 
 
+TIMINGS: dict[str, dict[str, int]] = {}  # step title -> {status mark: seconds since the Install screen started}
+
+
 STEP_LINE = re.compile(r"\[([ x>!-])\] ([A-Z][^│]*?)\s*(?:│\s*)?$")
 
 
@@ -890,23 +1159,23 @@ def final_button(vm: Vm) -> str | None:
 
 
 def scenario_install(vm: Vm, w: Wizard, partial: bool = False, ctrl_q: bool = False) -> bool:
-    log("13. Install")
+    log("Install screen")
     w.press("Install", expect_change=True, timeout=20)
-    check(w.wait_step(13, 30), "Summary -> Install screen")
+    check(w.wait_step(w.n("install"), 30), "Summary -> Install screen")
     w.snapshot("install-start")
     started = time.time()
     # Keys a person might press while waiting must not interrupt the install (there is no way back from here).
     time.sleep(8)
     vm.keys("esc", "esc", "ctrl+c", "enter")
     steps_now = install_steps(vm)
-    check(w.step() == 13 and len(steps_now) >= 10 and "!" not in steps_now.values(),
+    check(w.step() == w.n("install") and len(steps_now) >= 10 and "!" not in steps_now.values(),
           "Install: Esc, Ctrl+C and Enter while it runs do not interrupt it", str(steps_now))
     if ctrl_q:
         before = len(vm.raw)
         vm.keys("ctrl+q")
         time.sleep(1.5)
         left_the_screen = b"\x1b[?1049l" in bytes(vm.raw[before:])
-        check(not left_the_screen and w.step() == 13 and w.has(r"The installation is running"),
+        check(not left_the_screen and w.step() == w.n("install") and w.has(r"The installation is running"),
               "Install: Ctrl+Q is refused while the install runs (a warning is shown, the wizard stays)",
               "the wizard quit" if left_the_screen else vm.screen_text()[-400:])
     seen: dict[str, str] = {}
@@ -919,6 +1188,7 @@ def scenario_install(vm: Vm, w: Wizard, partial: bool = False, ctrl_q: bool = Fa
         for title, mark in steps.items():
             if seen.get(title) != mark:
                 seen[title] = mark
+                TIMINGS.setdefault(title, {})[mark] = int(time.time() - started)
                 print(f"  [{int(time.time() - started):5d}s] [{mark}] {title}", flush=True)
         button = final_button(vm)
         if button:
@@ -984,13 +1254,13 @@ PROFILE_A = {
     "tag": "a", "disk_gib": 100, "hostname": "testbox", "user": "alice", "win_name": "WINTEST", "win_user": "alice",
     "win_pw": "win-pw", "locale": "fr_FR.UTF-8", "keymap": "fr", "tz": "Europe/Paris",
     "win_tz": "Romance Standard Time", "win_input": "fr-FR", "fs": "btrfs", "kernel": "linux-lts", "home": False,
-    "key": "VK7JG-NPHTM-C97JM-9MPGT-3V66T", "separate_root_pw": True,
+    "key": "VK7JG-NPHTM-C97JM-9MPGT-3V66T", "separate_root_pw": True, "extras": "none",
 }
 PROFILE_B = {
     "tag": "b", "disk_gib": 140, "hostname": "second", "user": "bob", "win_name": "WINTWO", "win_user": "bob",
     "win_pw": "win2-pw-456", "locale": "de_DE.UTF-8", "keymap": "de-latin1", "tz": "Europe/Berlin",
     "win_tz": "W. Europe Standard Time", "win_input": "de-DE", "fs": "ext4", "kernel": "linux", "home": True,
-    "key": "YTMG3-N6DKC-DKB77-7M9GH-8HVX7", "separate_root_pw": False,
+    "key": "YTMG3-N6DKC-DKB77-7M9GH-8HVX7", "separate_root_pw": False, "extras": "dev",
 }
 IMAGE_INDEX: dict[str, str] = {}  # walk tag -> the Windows image index written in the answer file
 
@@ -1001,7 +1271,8 @@ def scenario_wizard_b(vm: Vm, w: Wizard) -> bool:
     """A second walk with other answers: ext4, minimal desktop, a separate /home, German settings and a Windows ISO
     given as a local file (the one bundled on the medium). Validation of bad input was done in the first walk."""
     log("Walk B: Germany, ext4, separate /home, minimal desktop, Windows ISO from a local file, Home edition")
-    check(w.wait_step(1, 30), "B: the wizard starts on step 1 of 13")
+    check(w.wait_step(1, 30), "B: the wizard starts on step 1")
+    w.total = w.read_total()
     check(w.next(2), "B: Welcome -> Region")
     check(w.fill("Country", "germ", clear=False), "B: the country filter takes the focus")
     vm.keys("enter")
@@ -1029,10 +1300,12 @@ def scenario_wizard_b(vm: Vm, w: Wizard) -> bool:
     check(w.next(8), "B: Storage -> Software")
     check(w.choose("Desktop", "Minimal"), "B: minimal desktop can be chosen")
     w.snapshot("software")
-    check(w.next(9), "B: Software -> Windows image")
+    check(w.next(9), "B: Software -> " + ("Extras" if w.total == 14 else "Windows image"))
+    if w.total == 14:
+        extras_defaults_minimal(vm, w, "B: ")
     check(w.choose("Where does the ISO come from", "ISO file I already have"), "B: the local-file source can be chosen")
     check(w.wait(r"Path of the ISO file", 5), "B: the path field appears")
-    refused(w, "B Windows image", 9, [
+    refused(w, "B Windows image", w.n("windows"), [
         ("Path of the ISO file", "", "Enter the path", "an empty path"),
         ("Path of the ISO file", "/etc/hostname", ".iso", "a file that is not an .iso"),
         ("Path of the ISO file", "/nonexistent/Win11.iso", "File not found", "a missing file"),
@@ -1040,19 +1313,20 @@ def scenario_wizard_b(vm: Vm, w: Wizard) -> bool:
     w.fill("Path of the ISO file", LOCAL_ISO)
     check(w.choose("Edition", "Home"), "B: the Home edition can be chosen")
     w.snapshot("windows-image-local")
-    check(w.next(10), "B: Windows image (local file, Home) -> Windows account")
+    check(w.next(w.n("winaccount")), "B: Windows image (local file, Home) -> Windows account")
     w.fill("Computer name", "WINTWO")
     w.fill("User name", "bob")
     w.fill("Password", "win2-pw-456")
     w.fill("Confirm the password", "win2-pw-456")
-    check(w.next(11), "B: Windows account -> Secure Boot")
+    check(w.next(w.n("secureboot")), "B: Windows account -> Secure Boot")
     check(w.has(r"Strategy that will be used: shim"), "B: Automatic resolves to shim + MOK (no TPM)")
     w.fill("Enrollment password", "Efgh5678")
     w.fill("Confirm the enrollment password", "Efgh5678")
     w.snapshot("secureboot")
-    check(w.next(12), "B: Secure Boot -> Summary")
-    summary = vm.screen_text()
-    w.snapshot("summary")
+    check(w.next(w.n("summary")), "B: Secure Boot -> Summary")
+    w.snapshot("summary-top")
+    summary = w.summary_text("Type /dev/vda to confirm")
+    w.snapshot("summary-bottom")
     check("ext4" in summary and "Arch home" in summary, "B Summary: ext4 and the /home partition are listed")
     check(re.search(r"Windows\s+64\.0 GiB", summary) is not None, "B Summary: Windows 64 GiB")
     check("second" in summary and "bob" in summary and "WINTWO" in summary, "B Summary: hostname, users and computer name")
@@ -1060,6 +1334,10 @@ def scenario_wizard_b(vm: Vm, w: Wizard) -> bool:
     check("Windows11.iso" in summary or "file" in summary.lower(), "B Summary: the Windows image is the local file")
     check("Germany" in summary or "DE / Europe/Berlin" in summary, "B Summary: German region", "")
     check(not any(secret in summary for secret in SECRETS), "B Summary: no secret is displayed")
+    if w.total == 14:
+        check(re.search(r"Developer tools\s+Languages and build tools, Command line helpers", summary) is not None
+              and re.search(r"Applications\s+none", summary) is not None,
+              "B Summary: Developer tools = the recommended groups (Languages and build tools, Command line helpers), Applications none")
     check(w.fill("Type /dev/vda to confirm", "/dev/vda"), "B: the confirmation is typed")
     return True
 
@@ -1161,6 +1439,19 @@ def scenario_inspect(disk: Path, p: dict) -> None:
         c(sh(f"grep -rEh '^%wheel' {root}/etc/sudoers {root}/etc/sudoers.d 2>/dev/null").startswith("%wheel"),
           "Disk: the wheel group may use sudo")
         c(not (root / "etc/sudoers.d/99-archinstall-aur").exists(), "Disk: no temporary sudoers file is left")
+        pkgs = sh(f"ls {root}/var/lib/pacman/local")
+        have = lambda name: re.search(rf"^{re.escape(name)}-[0-9]", pkgs, re.MULTILINE) is not None  # noqa: E731
+        dev_packages = ["git", "nodejs", "npm", "pnpm", "python", "python-pip", "python-pipx", "python-virtualenv", "go", "rust",
+                        "cmake", "ninja", "gdb", "github-cli", "openssh", "jq", "ripgrep", "fd", "fzf", "tmux", "neovim", "httpie"]
+        if p.get("extras") == "dev":
+            missing = [name for name in dev_packages if not have(name)]
+            c(not missing, "Disk: the recommended developer tools (languages, cli) are installed", ", ".join(missing))
+            c(not have("docker") and not have("yay") and not have("yay-bin") and not have("vscodium-bin"),
+              "Disk: no docker, no AUR helper and no AUR application (not chosen)")
+        elif p.get("extras") == "none":
+            present = [name for name in ("nodejs", "rust", "go", "neovim", "tmux", "ripgrep", "docker", "yay", "yay-bin",
+                                         "vscodium-bin", "postman-bin", "librewolf") if have(name)]
+            c(not present, "Disk: nothing extra is installed after an empty Extras choice (no dev tools, no AUR helper)", ", ".join(present))
         grub_cfg = (esp / "grub/grub.cfg").read_text(errors="replace")
         c("rd.luks" not in grub_cfg, "Disk: no LUKS parameter (not chosen)")
         c(f"/vmlinuz-{kernel} " in grub_cfg, f"Disk: GRUB boots /vmlinuz-{kernel}")
@@ -1269,7 +1560,7 @@ def run_walk(profile: dict, scenario) -> None:
         if reached and os.environ.get("TUI_STOP_AT_SUMMARY") == "1":
             note("TUI_STOP_AT_SUMMARY=1: the install was not started")
         elif reached:
-            if scenario_install(vm, w):
+            if scenario_install(vm, w, ctrl_q=(w.total == 14)):
                 scenario_reboot(vm, w)
         else:
             w.snapshot("stopped-here")
@@ -1322,7 +1613,10 @@ def quick_pass(extra: str, label: str, windows_expected: bool) -> None:
         check(w.next(2) and w.next(3) and w.next(4), f"{label}: Welcome -> Disk")
         w.snapshot(f"{label}-disk")
         check(w.wait(r"/dev/vdb.*LIVE MEDIUM", 10), f"{label}: the ISO disk (vdb) is marked LIVE MEDIUM")
-        vm.keys("down")
+        for _ in range(3):  # the table may not have the focus yet when the screen has just opened
+            vm.keys("down")
+            if w.wait(r"Selected: /dev/vdb", 3):
+                break
         check(w.has(r"Selected: /dev/vdb"), f"{label}: the cursor can be moved onto the live medium")
         w.press("Next", expect_change=False)
         check(w.step() == 4 and "started from" in w.error(), f"{label}: the Disk screen refuses the live medium", w.error())

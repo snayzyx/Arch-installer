@@ -1,0 +1,17 @@
+# Official repositories (pacman). The list of the preset's own install.sh, with the names that no longer exist
+# replaced (checked with `pacman -Si` on 2026-10-25): it is installed by the installer, with the system.
+# `syntax-highlighting` is needed by the `ii` shell and is not in the project's list.
+hyprland hyprpm xdg-desktop-portal-hyprland hypridle hyprlock hyprpolkitagent hyprsunset polkit
+qt6-base qt6-declarative qt6-5compat qt6-multimedia qt6-multimedia-ffmpeg qt6ct qt6-shadertools qt6-wayland
+qt6-svg qt6-tools qt6-imageformats qt6-location qt6-positioning qt6-lottie git curl
+wget jq python python-pip which libnotify xdg-utils xdg-user-dirs
+desktop-file-utils procps-ng psmisc util-linux coreutils findutils fd gawk
+sed grep zenity pipewire pipewire-pulse wireplumber libpulse playerctl
+cava mpv-mpris networkmanager bluez bluez-utils brightnessctl upower power-profiles-daemon
+lm_sensors rfkill ddcutil grim slurp wf-recorder hyprshot hyprpicker
+ffmpeg imagemagick wl-clipboard cliphist wtype swappy matugen awww
+hyprpaper swaybg swaync swayosd easyeffects quickshell syntax-highlighting kitty
+nautilus thunar rofi wofi fastfetch starship fish gnome-calculator
+papirus-icon-theme adwaita-cursors xdg-desktop-portal-gtk ttf-jetbrains-mono-nerd ttf-nerd-fonts-symbols-common ttf-material-symbols-variable noto-fonts noto-fonts-emoji
+ttf-fira-code ttf-iosevka-nerd ttf-meslo-nerd base-devel cmake ninja pkgconf clang
+gcc rsync

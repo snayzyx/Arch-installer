@@ -4,6 +4,8 @@
 #   verify-iso.sh /dist/<iso>                              online ISO
 #   verify-iso.sh /dist/<iso> offline /windows-source.iso  offline ISO + the Windows ISO it was built from
 #
+# With DRIVERS_SRC=<folder> in the environment (the folder given to build.ps1 -DriversDir), the drivers bundled
+# in the image are compared with it, for either flavour.
 # The offline check loop-mounts the image, so the container must be privileged.
 set -uo pipefail
 ISO="$1"; MODE="${2:-online}"; SRC_WIN="${3:-}"
@@ -125,6 +127,30 @@ if [[ "$MODE" == "offline" ]]; then
     umount /m
   else
     bad "cannot loop-mount the offline ISO: $(cat /tmp/mount.err)"
+  fi
+fi
+
+if [[ -n "${DRIVERS_SRC:-}" ]]; then
+  echo "--- bundled drivers"
+  want_files="$(find "$DRIVERS_SRC" -type f | wc -l)"
+  listed_files="$(bsdtar -tf "$ISO" 2>/dev/null | grep -E '^(\./)?windows/drivers/.*[^/]$' | wc -l)"
+  if [[ "$listed_files" == "$want_files" ]]; then
+    ok "windows/drivers/ lists all $want_files files of the source folder"
+  else
+    bad "windows/drivers/ lists $listed_files files, the source folder has $want_files"
+  fi
+  mkdir -p /md
+  if mount -o loop,ro "$ISO" /md 2>/tmp/mount-drivers.err; then
+    # rsync in dry-run mode, comparing contents: the builder image has no diffutils
+    rsync -rcni --delete "$DRIVERS_SRC/" /md/windows/drivers/ >/tmp/drivers.diff 2>&1
+    if [[ ! -s /tmp/drivers.diff ]]; then
+      ok "windows/drivers/ is identical to the source folder (contents compared)"
+    else
+      bad "windows/drivers/ differs from the source folder: $(head -n 3 /tmp/drivers.diff | tr '\n' ' ')"
+    fi
+    umount /md
+  else
+    bad "cannot loop-mount the ISO to compare the drivers: $(cat /tmp/mount-drivers.err)"
   fi
 fi
 

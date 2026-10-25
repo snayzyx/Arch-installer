@@ -16,7 +16,7 @@ dev = ["pytest", "tzlocal", "tzdata"]
 include = ["dualboot_installer*"]
 
 [tool.setuptools.package-data]
-dualboot_installer = ["*.tcss"]
+dualboot_installer = ["*.tcss", "presets/*/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

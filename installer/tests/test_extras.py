@@ -103,7 +103,8 @@ def test_the_aur_applications_are_installed_after_the_helper_and_the_sudoers_fil
     installs = [i for i, c in enumerate(text) if "yay -S --needed --noconfirm" in c]
     assert [text[i].rsplit(" ", 1)[1] for i in installs] == ["vscodium-bin", "postman-bin"]
     assert helper_build < installs[0]
-    assert text[-1].startswith("rm -f") and "99-archinstall-aur" in text[-1]
+    assert any(c.startswith("rm -f") and "99-archinstall-aur" in c for c in text)
+    assert text[-1].endswith("rm -rf /home/alice/.cache/yay /home/alice/.cache/paru")  # build caches are cleaned
     assert any(isinstance(op, FileWrite) and op.path.endswith("99-archinstall-aur") for op in runner.operations)
 
 
@@ -112,7 +113,7 @@ def test_a_helper_that_cannot_be_installed_skips_the_applications_without_failin
     runner = AurRunner(version_failures=0, build_failures=("yay-bin", "yay"))
     arch.install_aur_helper(Context(cfg, cfg.layout(), runner))  # does not raise
     assert not any("yay -S" in c for c in commands(runner))
-    assert commands(runner)[-1].startswith("rm -f")
+    assert any(c.startswith("rm -f") and "99-archinstall-aur" in c for c in commands(runner))
 
 
 # -- answers -------------------------------------------------------------------------------------------------
@@ -130,3 +131,11 @@ def test_unknown_ids_and_a_preset_without_the_desktop_are_reported():
     assert "developer tool group" in found and "application" in found and "preset" in found
     cfg = make_config(desktop="minimal", dotfiles="none")
     assert not [p for p in problems(cfg) if "preset" in p]
+
+
+def test_the_pacman_cache_is_emptied_before_the_unmount():
+    runner, _ = dry_run_everything(make_config())
+    text = commands(runner)
+    cache = next(i for i, c in enumerate(text) if "rm -rf /var/cache/pacman/pkg/*" in c)
+    umount = next(i for i, c in enumerate(text) if c.startswith("umount -R"))
+    assert cache < umount

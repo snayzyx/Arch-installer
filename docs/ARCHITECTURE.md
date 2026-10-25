@@ -67,9 +67,9 @@ Consequences to keep in mind:
 
 ## The wizard
 
-13 screens in `installer/dualboot_installer/screens/`, in this order:
+14 screens in `installer/dualboot_installer/screens/`, in this order:
 
-`Welcome` → `Region` → `Network` → `Disk` → `Layout` → `Accounts` → `Storage` → `Software` →
+`Welcome` → `Region` → `Network` → `Disk` → `Layout` → `Accounts` → `Storage` → `Software` → `Extras` →
 `WindowsSource` → `WindowsAccount` → `SecureBoot` → `Summary` → `Install`
 
 *Region comes first* because it applies the chosen keyboard layout to the live console
@@ -105,6 +105,48 @@ Safety rules built into the wizard:
 
 `--partial` means **skip Windows**: Arch Linux and GRUB are installed, the Windows steps are not
 run, and the Windows partition stays empty. The summary says so.
+
+### Developer tools, applications and desktop shells (`Extras`, `extras.py`, `presets/`)
+
+`extras.py` holds the data (developer tool groups, applications, the preset registry `DOTFILES`) and
+small pure functions; the screen, the package lists and the installation steps all read it. The defaults
+in `ArchConfig` are empty: nothing extra is installed unless the screen (or an answers file) asks, and the
+screen preselects the `RECOMMENDED_*` lists on the first visit.
+
+- **Developer tools and LibreWolf** are official packages: they join the `pacstrap` list.
+- **VSCodium and Postman** are AUR packages: the AUR step installs `yay` (prebuilt `yay-bin`; `paru-bin`
+  does not start against the current pacman, so `yay` is the fallback helper) and runs `yay -S` as the new
+  user, with a temporary `NOPASSWD` sudoers file that is removed afterwards. Never fatal. The yay and pacman
+  caches are emptied at the end.
+- **Desktop shell presets** (`presets/<id>/`: shell scripts, a Lua base config, `packages-official.txt`) are
+  installed by `steps/dotfiles.py`. The scripts are copied into the new system and run there as the new
+  user under `timeout`. They **follow the latest commit** of each project (the owner's requirement), which
+  is why the choice needs a connection and why there are three safeguards: (1) `check_sources` runs in the
+  preflight, before the disk is erased (a `curl` of each repository's `info/refs` — there is no git on the
+  live system — and the AUR RPC for each AUR package); (2) each script verifies that the files and
+  options it relies on still exist and exits with a distinct code; a failure runs the rollback script and
+  retries with the commits that were tested (`Preset.fallback_env`); (3) if that fails too, the default
+  Hyprland setup is restored and the installation goes on. Each script prints a `RECIPE-RESULT` line with the
+  installed commit.
+- Hyprland 0.56 reads `hyprland.lua` before `hyprland.conf`. MacShell needs the Lua form, so for that preset
+  the default setup is written as `hyprland.lua` (from `presets/macshell/hyprland-base.lua`, with the
+  keyboard layout filled in); Caelestia and Revo Shell deploy their own `hyprland.lua` and our
+  `hyprland.conf` becomes inert (it is backed up by them and restored by the rollback).
+- What was learned from running the recipes: a rolling `quickshell-git` is unavoidable; `caelestia install`
+  refuses `-git` shell and CLI packages (the dots' manifest names the stable ones); `pipewire-jack` must be
+  installed before any AUR build or `libcava` pulls `jack2`; Revo Shell's own `install.sh` lists five package
+  names that no longer exist, ships absolute symlinks into its author's home and exits 0 when its own checks
+  fail, so the preset wraps it and verifies the result itself; none of these shells can start in a container
+  (no GPU), so they were checked with `Hyprland --verify-config` and, for the shells, loaded on a headless
+  software-rendered compositor.
+
+### Windows and the Wi-Fi network
+
+The network used during the installation is added to the new Windows too: `wifi_profile_xml` builds a
+WPA2-Personal (or open) WLAN profile, staged with the end-of-Setup scripts; `archinstall-wifi.ps1` runs
+`netsh wlan add profile ... user=all` as SYSTEM, locks the clear-text file with `icacls` (SYSTEM and
+Administrators), and deletes it once added. A laptop whose Wi-Fi driver only arrives later gets a scheduled
+task that retries every 15 minutes for two days (and gives up and deletes the file after three).
 
 ## Disk layout
 

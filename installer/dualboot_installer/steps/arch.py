@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from .. import extras
@@ -273,6 +275,9 @@ def configure_system(ctx: Context) -> None:
         services += LAPTOP_SERVICES
     if "docker" in a.dev_groups:
         services.append("docker.service")
+    preset = extras.selected_preset(a)
+    if preset is not None:
+        services += [unit for unit in preset.services if unit not in services]
     if a.desktop == "hyprland":
         services.append("sddm.service")
     ctx.chroot("systemctl", "enable", *services)
@@ -325,7 +330,12 @@ def _accounts(ctx: Context) -> None:
 
     if a.desktop == "hyprland":
         home = f"/home/{a.username}"
-        ctx.write(f"{home}/.config/hypr/hyprland.conf", hyprland_config(a.keymap))
+        preset = extras.selected_preset(a)
+        if preset is not None and preset.base_config:
+            # The preset needs the Lua form of the setup (Hyprland reads hyprland.lua before hyprland.conf).
+            ctx.write(f"{home}/.config/hypr/hyprland.lua", extras.base_hyprland_config(preset, xkb_layout(a.keymap)))
+        else:
+            ctx.write(f"{home}/.config/hypr/hyprland.conf", hyprland_config(a.keymap))
         ctx.chroot("chown", "-R", f"{a.username}:{a.username}", f"{home}/.config")
 
 
@@ -350,6 +360,29 @@ def _build_aur_package(ctx: Context, package: str) -> None:
     ctx.chroot("runuser", "-l", ctx.cfg.arch.username, "-c", script)
 
 
+AUR_SUDOERS = "/etc/sudoers.d/99-archinstall-aur"
+
+
+@contextmanager
+def passwordless_sudo(ctx: Context) -> Iterator[None]:
+    """The new user may use sudo without a password, for the duration of a build only.
+
+    makepkg and the installers of the desktop shells call `sudo pacman`; nobody is there to type a
+    password. The file is removed afterwards even when the build fails.
+    """
+    ctx.write(AUR_SUDOERS, f"{ctx.cfg.arch.username} ALL=(ALL) NOPASSWD: ALL\n", 0o440)
+    try:
+        yield
+    finally:
+        ctx.run("rm", "-f", ctx.target_path(AUR_SUDOERS))
+
+
+def clean_build_caches(ctx: Context) -> None:
+    """Remove what the AUR helpers keep after a build (sources and built packages: hundreds of MB)."""
+    user = ctx.cfg.arch.username
+    ctx.chroot("rm", "-rf", f"/home/{user}/.cache/yay", f"/home/{user}/.cache/paru", check=False)
+
+
 def install_aur_helper(ctx: Context) -> None:
     """Build paru or yay from the AUR, then the applications that live there. Never fatal: the AUR
     can be unreachable, and the system is already installed by then."""
@@ -357,18 +390,14 @@ def install_aur_helper(ctx: Context) -> None:
     helper = extras.effective_aur_helper(a)
     if helper == "none":
         return
-    sudoers = "/etc/sudoers.d/99-archinstall-aur"
-    # makepkg calls sudo pacman; allow it without a password for the duration of the build only.
-    ctx.write(sudoers, f"{a.username} ALL=(ALL) NOPASSWD: ALL\n", 0o440)
-    try:
-        if not _install_helper(ctx, helper):
+    with passwordless_sudo(ctx):
+        if _install_helper(ctx, helper):
+            for package in extras.aur_packages(a):
+                _install_aur_package(ctx, helper, package)
+        else:
             ctx.log(f"WARNING: {helper} could not be installed, so the AUR packages "
                     f"({' '.join(extras.aur_packages(a)) or 'none'}) are skipped. Install them later.")
-            return
-        for package in extras.aur_packages(a):
-            _install_aur_package(ctx, helper, package)
-    finally:
-        ctx.run("rm", "-f", ctx.target_path(sudoers))
+    clean_build_caches(ctx)
 
 
 def _install_helper(ctx: Context, helper: str) -> bool:
@@ -391,8 +420,11 @@ def _install_helper(ctx: Context, helper: str) -> bool:
 
 
 def _install_aur_package(ctx: Context, helper: str, package: str) -> None:
+    # yay asks about cleaning, diffs, editing and upgrades even with --noconfirm in some versions: answer none.
+    flags = ("--removemake --answerclean None --answerdiff None --answeredit None --answerupgrade None"
+             if helper == "yay" else "")
     returncode = ctx.chroot("runuser", "-l", ctx.cfg.arch.username, "-c",
-                            f"{helper} -S --needed --noconfirm {package}", check=False)
+                            f"{helper} -S --needed --noconfirm {flags} {package}".replace("  ", " "), check=False)
     if returncode:
         ctx.log(f"WARNING: {package} could not be installed from the AUR (exit code {returncode}). "
                 f"Install it later with: {helper} -S {package}")

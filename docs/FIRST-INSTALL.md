@@ -50,4 +50,11 @@ start; the disk you choose is **erased completely**.
   entry "Windows 11 Setup" must come first, then `ArchInstall`.
 - Shim shows "Verification failed" at a boot: the key was not enrolled. Turn Secure Boot off,
   start Arch (it queues the enrollment again), restart and press a key within 10 seconds.
+- Windows has no Wi-Fi after its installation: a stock Windows ISO does not carry every Wi-Fi driver. The
+  installer keeps the Wi-Fi, network and Bluetooth drivers of the Windows that was on the disk before (read
+  while the disk still holds it, then given to the new Windows), but not when that Windows was encrypted with
+  BitLocker or was already gone. Connect an Ethernet cable, or your phone by USB (tethering), once: Windows
+  Update installs the driver. To avoid it next time, build the ISO with your laptop's driver packages:
+  `.\build.ps1 -DriversDir <folder>` (extracted: the `.inf`, `.cat` and `.sys` files). The list of what
+  Windows received is in `C:\Windows\Temp\archinstall-finish.log`.
 - Keep the USB stick: the installer can be run again from it.

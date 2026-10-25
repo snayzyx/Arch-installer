@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from .config import InstallConfig
 from .layout import Layout
 from .runner import CommandError
-from .steps import arch, bootloader, finish, preflight, storage, windows
+from .steps import arch, bootloader, dotfiles, finish, preflight, storage, windows
 from .steps.context import Context, StepError
 
 
@@ -41,7 +41,8 @@ def build_plan(cfg: InstallConfig, layout: Layout) -> list[Step]:
         Step("base", "Install the Arch Linux base system", arch.install_base),
         Step("configure", "Configure Arch Linux", arch.configure_system),
         Step("bootloader", "Install GRUB and set up Secure Boot", bootloader.install_bootloader),
-        Step("aur", "Install the AUR helper", arch.install_aur_helper),
+        Step("aur", "Install the AUR helper and applications", arch.install_aur_helper),
+        Step("dotfiles", "Install the desktop shell", dotfiles.install_dotfiles),
         Step("windows-iso", "Get the Windows 11 ISO", None if cfg.partial else windows.fetch_iso, note=skipped),
         Step("windows-stage", "Stage the Windows 11 setup", None if cfg.partial else windows.stage_setup,
              note=skipped),

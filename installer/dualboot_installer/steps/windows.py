@@ -25,14 +25,18 @@ from ..windows_unattend import (
     MAX_DISKS,
     SETUP_ENTRY_TITLE,
     SETUP_LOADER,
+    WIFI_PROFILE_FILE,
     bootorder_script,
     build_unattend,
     finish_script,
     launcher_cmd,
     setup_complete_cmd,
+    wifi_profile_xml,
+    wifi_script,
     winpeshl_ini,
 )
 from .context import TARGET, Context, StepError
+from .windows_drivers import HARVEST_DIR, driver_sources, stage_drivers
 
 ISO_MOUNT = "/tmp/archinstall-windows-iso"
 SETUP_MOUNT = "/tmp/archinstall-windows-setup"
@@ -230,20 +234,37 @@ def stage_setup(ctx: Context) -> None:
     ctx.run("wimlib-imagex", "update", boot_wim, str(setup_index), stdin=wim_update_script(STAGE_DIR), quiet=True)
 
     # 3. One answer file per possible disk number, and the scripts for the end of Setup.
+    drivers = driver_sources()  # network/Bluetooth drivers of the old Windows and the ones bundled in the ISO
     for disk in range(MAX_DISKS):
         ctx.write_host(f"{SETUP_MOUNT}/{ANSWER_DIR}/unattend-{disk}.xml",
-                       build_unattend(cfg, disk_id=disk, partition_id=windows_part.number, image_index=index),
+                       build_unattend(cfg, disk_id=disk, partition_id=windows_part.number, image_index=index,
+                                      drivers=bool(drivers)),
                        secret=True)
     scripts = f"{SETUP_MOUNT}/sources/$OEM$/$$/Setup/Scripts"
     ctx.write_host(f"{scripts}/SetupComplete.cmd", setup_complete_cmd())
-    ctx.write_host(f"{scripts}/archinstall-finish.ps1", finish_script(w, shared_partition=cfg.disk.shared_enabled))
+    net = cfg.network
+    wifi_xml = wifi_profile_xml(net.wifi_ssid, net.wifi_security, net.wifi_passphrase) if net.wifi_ssid else None
+    ctx.write_host(f"{scripts}/archinstall-finish.ps1",
+                   finish_script(w, shared_partition=cfg.disk.shared_enabled, wifi=wifi_xml is not None,
+                                 drivers=bool(drivers)))
     ctx.write_host(f"{scripts}/archinstall-bootorder.ps1", bootorder_script())
+    if wifi_xml is not None:
+        # The network used during this installation, so that Windows joins it too (the profile file is
+        # deleted by archinstall-wifi.ps1 once it is added).
+        ctx.write_host(f"{scripts}/{WIFI_PROFILE_FILE}", wifi_xml, secret=True)
+        ctx.write_host(f"{scripts}/archinstall-wifi.ps1", wifi_script())
+    elif net.wifi_ssid:
+        ctx.log(f"The Wi-Fi network {net.wifi_ssid!r} cannot be copied to Windows (not WPA2-Personal or open).")
+
+    stage_drivers(ctx, SETUP_MOUNT, drivers)
 
     # 4. Clean up, and make the next boot go to Windows Setup.
     ctx.run("sync")
     ctx.run("umount", SETUP_MOUNT)
     ctx.run("umount", ISO_MOUNT)
     ctx.run("rm", "-rf", STAGE_DIR)
+    if drivers:
+        ctx.run("rm", "-rf", str(HARVEST_DIR))  # free the RAM disk
     if iso == DOWNLOAD_TARGET:
         ctx.run("rm", "-f", DOWNLOAD_TARGET)
     if wim == CONVERTED_IMAGE:

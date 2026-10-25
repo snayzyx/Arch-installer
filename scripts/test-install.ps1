@@ -33,6 +33,30 @@
 .PARAMETER AurHelper
   none (default), paru or yay: the AUR helper is built for real (network access to the AUR).
 
+.PARAMETER DevGroups
+  Comma-separated developer tool groups (languages, cli, docker): answers file key arch.dev_groups.
+
+.PARAMETER DriversFrom
+  A folder of extracted driver packages (for instance the one windows-drivers-proof.ps1 harvested) handed to the
+  installer as if it were bundled in the ISO (build.ps1 -DriversDir). With -WindowsIso, the checks verify that they
+  are staged under sources\$OEM$\$1\Drivers and that the answer files list C:\Drivers.
+
+.PARAMETER Dotfiles
+  A desktop shell preset (macshell or caelestia): the installer downloads the latest version from GitHub and the
+  AUR. Needs network access and the Hyprland desktop. Its checks are in scripts\integration\checks-dotfiles-<id>.sh.
+
+.PARAMETER Apps
+  Comma-separated desktop applications (vscodium, librewolf, postman): answers file key arch.apps.
+  They are only installed with -Desktop hyprland; vscodium and postman are built from the AUR.
+
+.PARAMETER AurBreak
+  Failure path: the AUR is made unreachable for the installed system (a bogus hosts entry added once the
+  installer has written /etc/hosts). The installation must still end with exit code 0 and warnings.
+
+.PARAMETER AurBreakEarly
+  Like -AurBreak, but the AUR is already unreachable when the installer starts, so the check made before
+  anything is erased sees it too (it must only warn: the AUR applications are optional extras).
+
 .PARAMETER DownloadSource
   With -WindowsIso: the installer downloads that ISO from an HTTPS server (nginx with a throw-away
   CA) started inside the container, the way a pasted Microsoft link works, then stages it.
@@ -75,6 +99,12 @@ param(
   [ValidateSet('none', 'paru', 'yay')][string]$AurHelper = 'none',
   [switch]$DownloadSource,
   [switch]$Laptop,
+  [string]$DevGroups = '',
+  [string]$Apps = '',
+  [string]$Dotfiles = '',
+  [string]$DriversFrom = '',
+  [switch]$AurBreak,
+  [switch]$AurBreakEarly,
   [string]$Name,
   [string]$EvidenceDir
 )
@@ -107,6 +137,15 @@ if ($DownloadSource -and -not $WindowsIso) { throw '-DownloadSource needs -Windo
 if ($SharedPartition -and -not $WindowsIso) { Write-Warning '-SharedPartition without -WindowsIso only checks the partition layout.' }
 if ($DownloadSource) { $extra += @('-e', 'DOWNLOAD_SOURCE=1') }
 if ($Laptop) { $extra += @('-e', 'LAPTOP=1') }
+if ($DevGroups) { $extra += @('-e', "DEV_GROUPS=$DevGroups") }
+if ($Apps) { $extra += @('-e', "APPS=$Apps") }
+if ($Dotfiles) { $extra += @('-e', "DOTFILES=$Dotfiles") }
+if ($DriversFrom) {
+  if (-not (Test-Path -LiteralPath $DriversFrom -PathType Container)) { throw "Drivers folder not found: $DriversFrom" }
+  $DriversFrom = (Resolve-Path -LiteralPath $DriversFrom).Path
+  $extra += @('-v', "${DriversFrom}:/drivers-from:ro", '-e', 'DRIVERS_FROM=/drivers-from')
+}
+if ($AurBreakEarly) { $extra += @('-e', 'AUR_BREAK=early') } elseif ($AurBreak) { $extra += @('-e', 'AUR_BREAK=1') }
 $extra += @('-e', "AUR_HELPER=$AurHelper")
 if (-not $Name) { $Name = 'archinstall-test-' + (Get-Random -Maximum 99999) }
 $extra += @('--name', $Name)
@@ -158,7 +197,8 @@ if ($EvidenceDir -and (Test-Path (Join-Path $EvidenceDir 'generated'))) {
   }
 }
 Write-Host ("`nscenario: strategy=$Strategy fs=$Filesystem desktop=$Desktop options=[$optionText] aur=$AurHelper " +
-            "laptop=$($Laptop.IsPresent) windows=$([bool]$WindowsIso) download=$($DownloadSource.IsPresent); " +
+            "laptop=$($Laptop.IsPresent) dev=[$DevGroups] apps=[$Apps] aurbreak=$($AurBreak.IsPresent)/$($AurBreakEarly.IsPresent) " +
+            "windows=$([bool]$WindowsIso) download=$($DownloadSource.IsPresent); " +
             "exit code $code; PowerShell syntax failures $syntaxFailures; took $seconds s")
 if ($EvidenceDir) { "exit_code=$code`nsyntax_failures=$syntaxFailures`nseconds=$seconds" | Set-Content -LiteralPath (Join-Path $EvidenceDir 'result.txt') -Encoding ascii }
 if ($code -ne 0) { throw "Integration test failed (exit code $code)" }

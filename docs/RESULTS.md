@@ -34,6 +34,10 @@ table below).
 | **The real interactive wizard** on the offline ISO | driven key by key in a VM: 13 screens, validations, back navigation, Esc/Ctrl+C/Enter during the install, two full installs, disk inspected afterwards | `dist\tui-screens\final\` (254 checks, 0 failed) |
 | **Laptop wizard walk** | NVMe disk (`nvme0n1p1`...), Wi-Fi only with no wired route (access point in a network namespace), simulated battery and RAID/VMD controller, install over Wi-Fi, installed system boots and joins the same network by itself, `Hyprland --verify-config` answers `config ok`, SDDM greeter appears | `dist\tui-screens\laptop\` (254 checks, 2 defects found and fixed) |
 | SDDM keyboard layout | typing the physical keys of `azerty` logs in, `qwerty` is refused: the French layout is used | `dist\tui-screens\sddm-keyboard\` |
+| **Developer tools and applications** | the real installation steps in a container and the real wizard in a VM: 22 developer packages, LibreWolf (official), `yay` built by itself, `vscodium-bin` and `postman-bin` from the AUR, Docker group and service; the AUR unreachable (the install still ends, with warnings); nothing extra by default | `dist\screens\containers\extras\` (6 scenarios, 61-111 checks), `dist	ui-screens\extras\` (745 checks over 5 passes) |
+| **Desktop shell presets** (MacShell + MacOS-Like icons, Revo Shell, Caelestia) | each one through the real installer: latest version cloned, scripts run as the new user, expected files, `Hyprland --verify-config` ok, then fault injection on the real engine: the latest version fails -> rollback -> retry with the tested commits -> default setup back; unreachable source -> "Nothing was changed" before the erase | `dist\screens\containers\presets\<id>\` (151-195 checks per run) |
+| **The three desktop shells on a screen** | each preset installed by the real installer, then the installed disk booted in QEMU/KVM (virtio-vga, no GL: Mesa llvmpipe is enough, no setting needed) with a test-only SDDM autologin, screenshots every 15 s: MacShell (macOS-style menu bar, Dock), Caelestia (vertical bar, wallpaper, themed terminal), Revo Shell (Finder bar, top bar, Dock); keyboard layout `fr` in all three sessions; the default setup (waybar, wofi, kitty) as a baseline | `dist\screens\preset-boot\<id>\` |
+| **Windows drivers and Wi-Fi profile** | the drivers of this machine's adapters are read from the real Windows of an earlier test disk (Ethernet, Wi-Fi and Bluetooth packages found in 0.7 s, 20 MB, copied identically), staged with the real `stage_setup` under `$OEM$\$1\Drivers` with `DriverPaths` in the answer file; the Wi-Fi profile format was checked against a real Windows profile; the scripts pass the PowerShell parser | `dist\screens\containers\drivers\` |
 | ISO builds | online 1.6 GB and offline 10.7 GB; contents and checksums verified, installer files identical to the repository, Windows ISO inside has the same SHA-256 as the source, shim hash pinned | `docker/verify-iso.sh` output |
 | Booting the ISO as a **disk** (the USB case) | virtio disk, kernel command line as shipped | `/run/archiso/bootmnt` stays mounted |
 
@@ -61,6 +65,13 @@ table below).
 | `powerprofilesctl` missing `python-gobject` | the command crashed | fixed, see the final acceptance below |
 | Wi-Fi screen stayed on "Not connected" after connecting | Next blocked until Scan was pressed | fixed, unit test fails without the fix; see the final acceptance |
 | Ctrl+Q during the installation quit the wizard | half-installed disk | fixed (ignored while installing), verified in the VM |
+| Caelestia dots hard-code `kb_layout = "us"` | the layout chosen in the wizard was ignored in the Hyprland session (QWERTY for a French user) | fixed (written in the file the dots never overwrite), verified in a VM session |
+| Revo Shell hard-codes `kb_layout = "us,ara"` | same | fixed, verified in a VM session |
+| Revo Shell's `install.sh`: five dead package names, absolute symlinks into its author's home (the macOS shell loaded nothing for any other user), exit code 0 when its own checks fail, 860 MB of wallpapers downloaded to keep six | the preset could not work, or was slow | wrapped: our package list, symlink repair, our own verification, the wallpaper sizes from GitHub's tree API; verified |
+| MacShell: after a rollback and a successful retry, waybar and the network applet stayed next to MacShell | two bars at login | fixed (markers), verified on the real engine |
+| MacShell: `bluez` (the Bluetooth daemon) not installed and no service enabled on a desktop PC | its Bluetooth menu did nothing | fixed (package and `Preset.services`) |
+| Caelestia: the rollback only restored `~/.config/hypr` | fish, foot, GTK... files of the dots stayed | fixed (the whole backup is restored), verified: 0 differences |
+| The yay and pacman caches stayed on disk | about 2.4 GB | fixed (emptied at the end) |
 | `scripts/rebuild-all.ps1` passed `-SkipImage` as the output folder | the ISO landed in a folder named `-SkipImage` and the old one was verified | fixed |
 
 Known and left alone (cosmetic): the SDDM greeter shows `us` until the first key is pressed, and
@@ -80,6 +91,12 @@ files**:
 | Headless whole flow on the final offline ISO with the laptop answers (Secure Boot on and key not enrolled, TPM, NVMe) | **85 checks, 0 failed**: installer exit 0 in 2.7 min; Windows installs by itself and restarts onto Windows (no blue screen) before the boot-order task puts ArchInstall first; Fast Startup off, no `hiberfil.sys`, the Windows partition mounts read-write after a shutdown; MOK enrollment, then Arch with `SecureBoot=1`, `python-gobject` installed and `powerprofilesctl list` working; GRUB menu to the Windows lock screen. The VM hypervisor crashed once (`KVM: entry failed`, 4th time over all runs, not tied to the ISO); the harness resumed from its checkpoint. `dist\screens\e2e4\` |
 
 ## NOT verified
+
+- **The desktop shells beyond a first screen**: the glass and blur effects, the lock screens (MacLock, Caelestia),
+  Caelestia's launcher and dashboard, Revo Shell's own keybindings, and the Wi-Fi and Bluetooth panels (the VM has
+  no adapter) were not exercised; a real GPU may behave differently from Mesa's software renderer. Revo Shell
+  shows warnings about imports from its `ii` shell (not deployed), a broken guide popup, and two bars: it stays
+  labelled experimental. MacShell's Dock looks for `hyprpaper` for its glass effect (not installed).
 
 - **Any real hardware.** Firmwares differ; a real firmware may ignore `BootNext` (the code also
   puts the temporary entry first in the boot order, which is what worked in the VM), may drop boot

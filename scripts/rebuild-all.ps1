@@ -19,6 +19,10 @@
 .PARAMETER OutDir
   Where the ISOs are written and verified. Defaults to .\dist.
 
+.PARAMETER DriversDir
+  A folder of extracted Windows driver packages to bundle into both ISOs (build.ps1 -DriversDir) and to check
+  against the image afterwards.
+
 .PARAMETER OfflineOnly
   Skip the online ISO (it is already built and verified in OutDir).
 
@@ -31,7 +35,8 @@ param(
   [switch]$SkipImage,
   [switch]$SkipVerify,
   [string]$OutDir,
-  [switch]$OfflineOnly
+  [switch]$OfflineOnly,
+  [string]$DriversDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,11 +48,16 @@ $Dist = (Resolve-Path $OutDir).Path
 # build.ps1 then took for its -OutDir (the ISO ended up in a folder named "-SkipImage").
 $buildArgs = @{ OutDir = $Dist }
 if ($SkipImage) { $buildArgs['SkipImage'] = $true }
+if ($DriversDir) {
+  $DriversDir = (Resolve-Path -LiteralPath $DriversDir).Path
+  $buildArgs['DriversDir'] = $DriversDir
+}
 
 function Invoke-Verify {
   param([string]$IsoName, [string]$Mode, [string]$Source)
   $docker = @('run', '--rm', '--privileged', '-v', "${Root}:/src:ro", '-v', "${Dist}:/dist:ro")
   $sourceArg = ''
+  if ($DriversDir) { $docker += @('-v', "${DriversDir}:/drivers-source:ro", '-e', 'DRIVERS_SRC=/drivers-source') }
   if ($Source) {
     $docker += @('-v', "${Source}:/windows-source.iso:ro")
     $sourceArg = '/windows-source.iso'
@@ -70,7 +80,9 @@ if (-not $OfflineOnly) {
 if ($WindowsIso) {
   $WindowsIso = (Resolve-Path -LiteralPath $WindowsIso).Path
   Write-Host '==> Offline ISO' -ForegroundColor Cyan
-  & (Join-Path $Root 'build.ps1') -SkipImage -WindowsIso $WindowsIso -OutDir $Dist
+  $offlineArgs = @{ SkipImage = $true; WindowsIso = $WindowsIso; OutDir = $Dist }
+  if ($DriversDir) { $offlineArgs['DriversDir'] = $DriversDir }
+  & (Join-Path $Root 'build.ps1') @offlineArgs
   $offline = Get-ChildItem $Dist -Filter 'archinstall-offline-*.iso' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
   if (-not $SkipVerify) { Invoke-Verify -IsoName $offline.Name -Mode 'offline' -Source $WindowsIso }
 }

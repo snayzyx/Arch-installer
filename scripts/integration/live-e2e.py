@@ -392,6 +392,48 @@ def check_laptop_arch(vm: Vm) -> None:
           "`powerprofilesctl list` works in the installed Arch (it lists the power profiles)", out)
 
 
+def decode_dacl(data: bytes) -> tuple[int, list[tuple[int, int, str]]]:
+    """(control flags, [(ACE type, access mask, SID)]) of a self-relative NTFS security descriptor."""
+    control = struct.unpack_from("<H", data, 2)[0]
+    offset = struct.unpack_from("<I", data, 16)[0]
+    aces: list[tuple[int, int, str]] = []
+    if offset:
+        _, _, _, count, _ = struct.unpack_from("<BBHHH", data, offset)
+        position = offset + 8
+        for _ in range(count):
+            kind, _, size, mask = struct.unpack_from("<BBHI", data, position)
+            sid = data[position + 8:position + size]
+            parts = struct.unpack_from(f"<{sid[1]}I", sid, 8)
+            aces.append((kind, mask, f"S-{sid[0]}-{int.from_bytes(sid[2:8], 'big')}-" + "-".join(map(str, parts))))
+            position += size
+    return control, aces
+
+
+def check_midsetup_drivers(f: Flavor) -> None:
+    """The copy of the disk taken while Windows was still setting itself up: C:\\Drivers must be there."""
+    log(f"E2E-drivers [{f.tag}] the disk copied in the middle of Windows Setup (VM paused for the copy)")
+    copy = WORK / f"{f.tag}-midsetup.img"
+    if not copy.exists():
+        check(False, "a copy of the disk was taken in the middle of Windows Setup")
+        return
+    try:
+        with offline(copy) as mounts:
+            windows = mounts.get(2)
+            if not windows:
+                check(False, "the Windows partition of the mid-Setup copy can be read")
+                return
+            folder = windows / "Drivers"
+            infs = sorted(str(p.relative_to(folder)) for p in folder.rglob("*.[iI][nN][fF]")) if folder.exists() else []
+            for name in infs[:12]:
+                print(f"        C:\\Drivers\\{name}")
+            check(folder.exists() and bool(infs), r"C:\Drivers exists while Windows is setting itself up, with INF files "
+                  f"({len(infs)})", str(folder))
+            check(any("e1" in name.lower() or "net" in name.lower() for name in infs),
+                  "...among them a network driver package (the Intel NIC of this VM)", str(infs[:8]))
+    finally:
+        copy.unlink(missing_ok=True)
+
+
 def extract_kernel() -> tuple[Path, Path]:
     kernel, initrd = WORK / "e2e-vmlinuz", WORK / "e2e-initramfs.img"
     stamp = WORK / "e2e-kernel.stamp"
@@ -415,24 +457,32 @@ def poweroff(vm: Vm, name: str) -> bool:
 # =============================================================================================================
 
 
-def phase_install(f: Flavor) -> bool:
-    log(f"E2E-1 [{f.tag}] offline ISO, live system, the REAL installer (no --partial), firmware writes for real")
+def phase_install(f: Flavor, second: bool = False) -> bool:
+    number = "6" if second else "1"
+    log(f"E2E-{number} [{f.tag}] " + ("SECOND install of the same ISO on the disk that holds the first one (driver harvest)"
+                                   if second else "offline ISO, live system, the REAL installer (no --partial), firmware writes for real"))
     if not ISO.exists():
         check(False, f"the ISO {ISO} exists")
         return False
     print(f"      ISO {ISO} ({ISO.stat().st_size / 2**30:.2f} GiB)", flush=True)
-    f.disk.unlink(missing_ok=True)
-    subprocess.run(["truncate", "-s", "100G", str(f.disk)], check=True)
-    fresh = lv.fresh_vars(f.tag, *f.vars_flags)
-    assert fresh == f.vars
-    shutil.rmtree(f.tpm, ignore_errors=True)
+    if second:
+        if not load_ckpt(f, 4):  # the disk with the first install: Windows (driver store included) and Arch
+            return False
+        set_secure_boot(f, False)  # the unsigned live system has to start
+    else:
+        f.disk.unlink(missing_ok=True)
+        subprocess.run(["truncate", "-s", "100G", str(f.disk)], check=True)
+        fresh = lv.fresh_vars(f.tag, *f.vars_flags)
+        assert fresh == f.vars
+        shutil.rmtree(f.tpm, ignore_errors=True)
     certs = lv.vars_certs(f.vars)
     for name in ("PK", "KEK", "db"):
         for subject in certs.get(name, []):
             print(f"      firmware {name:3} {subject[:140]}", flush=True)
     kernel, initrd = extract_kernel()
     vm = Vm(f"{f.tag}-live", f.vars, [f.disk, build_snapshot(f)], live=True, disk_bus="nvme", cpu=CPU, extra=EXTRA, tpm=True, tpm_dir=f.tpm,
-            tpm_device="tpm-crb", iso=ISO, kernel=kernel, initrd=initrd, memory=MEMORY, cpus=CPUS)
+            tpm_device="tpm-crb", iso=ISO, kernel=kernel, initrd=initrd, memory=MEMORY, cpus=CPUS,
+            nic="e1000e" if second else "virtio-net-pci")  # the harvest matches the NIC of THIS machine
     vm.start()
     installed = False
     try:
@@ -468,22 +518,34 @@ def phase_install(f: Flavor) -> bool:
         _, whole = vm.run("echo ===LOG-BEGIN===; cat /root/install.log; echo ===LOG-END===", 180)
         body = whole.split("===LOG-BEGIN===", 1)[-1].split("===LOG-END===", 1)[0]
         SHOTS.mkdir(parents=True, exist_ok=True)
-        (SHOTS / f"{f.tag}-1-installer.log").write_text(body)
-        print(f"      full installer log: {SHOTS / (f.tag + '-1-installer.log')} ({len(body.splitlines())} lines)", flush=True)
+        (SHOTS / f"{f.tag}-{number}-installer.log").write_text(body)
+        print(f"      full installer log: {SHOTS / (f.tag + '-' + number + '-installer.log')} ({len(body.splitlines())} lines)", flush=True)
 
         statuses = re.findall(r"^--- \[(\w+)\] (.+)$", body, re.MULTILINE)
         for status, title in statuses:
             print(f"        {status:8} {title}")
         installed = bool(exit_code) and exit_code.group(1) == "0"
         check(installed, "the installer exits with code 0", out[-1200:])
-        check(len(statuses) == 12 and all(s == "done" for s, _ in statuses),
-              "all 12 steps are 'done' (none skipped, none failed)", str(statuses))
+        check(len(statuses) >= 12 and all(s == "done" for s, _ in statuses),
+              f"all {len(statuses)} steps of the plan are 'done' (none skipped, none failed)", str(statuses))
         # The installer's own failures start with "ERROR:" (a transient pacman mirror error is not one of them).
         check(re.search(r"(?m)^(?:\[[^\]]*\]\s*)?ERROR:", body) is None, "no 'ERROR:' line from the installer in its log")
         if LAPTOP:
             check("TestNet" in body and "is kept for the installed system" in body,
                   "the installer says the Wi-Fi network 'TestNet' is kept for the installed system")
             check(all(word not in body for word in ("wifi-test-pass-2026",)), "the Wi-Fi passphrase does not appear in the installer log")
+        if LAPTOP and not second:
+            check("No NTFS partition on this disk" in body, "on a blank disk the driver harvest finds no Windows and the install goes on")
+        if second:
+            for line in body.splitlines():
+                if re.search(r"drivers? of|driver store|Kept \d+ driver|driver package|BitLocker|cannot be read", line):
+                    print(f"      installer: {line[:260]}")
+            check("PCI\\VEN_8086&DEV_10D3" in body, "the harvest looks for the Intel e1000e NIC of this VM (PCI\\VEN_8086&DEV_10D3)")
+            check("Windows driver store found" in body, "the old Windows on the disk is mounted read-only and its driver store is found")
+            kept = re.search(r"Kept (\d+) driver package", body)
+            check(bool(kept) and int(kept.group(1)) >= 1, "the installer keeps at least one matching driver package of the old Windows",
+                  kept.group(0) if kept else "no 'Kept N driver package' line")
+            check("go to Windows (C:\\Drivers" in body, "the installer says the packages go to Windows (C:\\Drivers)")
         if not installed:
             print(indent("\n".join(body.splitlines()[-40:])))
             return False
@@ -526,10 +588,23 @@ def phase_install(f: Flavor) -> bool:
             "cd /; umount /mnt/ws", 120)
         print(indent(out))
         lowered = out.lower()  # the ISO's own files are lower case on FAT
+        if LAPTOP:
+            check("archinstall-wifi.xml" in lowered and "archinstall-wifi.ps1" in lowered,
+                  "the Setup partition has $OEM$\\$$\\Setup\\Scripts\\archinstall-wifi.xml and archinstall-wifi.ps1", out)
         check("install.swm" in lowered and "archinstall.cmd" in lowered and "winpeshl.ini" in lowered
               and "setupcomplete.cmd" in lowered and "bootx64.efi" in lowered and "archinstall-finish.ps1" in lowered,
               "WINSETUP holds Windows Setup, split install.swm, the launcher inside boot.wim, the answer files and SetupComplete",
               out)
+        if second:
+            code, out = vm.run(f"mkdir -p /mnt/ws && mount -o ro {TARGET}p4 /mnt/ws && cd /mnt/ws && "
+                               "echo DRIVER-PACKAGES: $(ls 'sources/$OEM$/$1/Drivers' 2>&1 | head -30) && "
+                               "echo DRIVERPATHS-IN-ANSWER-FILES: $(grep -l DriverPaths archinstall/unattend-*.xml | wc -l); cd /; umount /mnt/ws", 60)
+            print(indent(out))
+            packages = out.split("DRIVER-PACKAGES:")[-1].split("DRIVERPATHS")[0].strip()
+            check(bool(packages) and "No such file" not in packages, "the Setup partition holds sources\\$OEM$\\$1\\Drivers with driver packages", packages)
+            check(re.search(r"DRIVERPATHS-IN-ANSWER-FILES: (\d+)", out) is not None and
+                  int(re.search(r"DRIVERPATHS-IN-ANSWER-FILES: (\d+)", out).group(1)) == 16,
+                  "the 16 answer files all list C:\\Drivers as a driver path (DriverPaths)", out)
         code, out = vm.run(f"mkdir -p /mnt/esp && mount -o ro {TARGET}p1 /mnt/esp && cd /mnt/esp && "
                            "find . -maxdepth 3 -type f | sort | head -40; cd /; umount /mnt/esp", 60)
         print(indent(out))
@@ -545,7 +620,7 @@ def phase_install(f: Flavor) -> bool:
     if f.expected == "shim":
         check("MokNew" in nv["names"], "NVRAM file: the MOK enrollment request is pending (MokNew)")
         set_secure_boot(f, True)  # the user's firmware has Secure Boot ENABLED for the real boots that follow
-    save_ckpt(f, 1)
+    save_ckpt(f, 5 if second else 1)
     return installed
 
 
@@ -565,15 +640,16 @@ def task_ran(nv: dict) -> bool:
     return setup_done(nv) and first_entry(nv) == "ArchInstall"
 
 
-def phase_windows(f: Flavor) -> bool:
-    log(f"E2E-2 [{f.tag}] first boot with Secure Boot ENABLED: Windows 11 Setup must start by itself and finish by itself")
+def phase_windows(f: Flavor, second: bool = False) -> bool:
+    log(f"E2E-{'7' if second else '2'} [{f.tag}] first boot with Secure Boot ENABLED: Windows 11 Setup must start by itself and finish by itself"
+        + (" (second install)" if second else ""))
     # Nested KVM under Docker Desktop (WSL2/Hyper-V) sometimes dies with "KVM: entry failed, hardware error 0x0":
     # that freezes the guest and says nothing about the installer, so such a run is redone from checkpoint 1.
     result: dict = {"crashed": True}
     for attempt in range(1, 4):
-        if not load_ckpt(f, 1):
+        if not load_ckpt(f, 5 if second else 1):
             return False
-        result = windows_run(f, attempt)
+        result = windows_run(f, attempt, midsetup=300 if second else None)
         if not result["crashed"]:
             break
         print(f"      attempt {attempt}: the hypervisor froze the VM (KVM entry failed): starting again from checkpoint 1",
@@ -589,14 +665,16 @@ def phase_windows(f: Flavor) -> bool:
           "Windows' automatic restart reached WINDOWS again: shim's blue screen did not appear before the first start was over")
     check(result["task_at"] is not None, "at the next Windows start the ArchInstallBootOrder task ran: ArchInstall is first in NVRAM")
     check(task_ran(nv), "NVRAM at the end: no 'Windows 11 Setup' entry, Windows Boot Manager registered, ArchInstall FIRST")
-    save_ckpt(f, 2)
-    check_windows_files(f, "after Windows' first start")
+    save_ckpt(f, 6 if second else 2)
+    if second:
+        check_midsetup_drivers(f)
+    check_windows_files(f, "after the second install" if second else "after Windows' first start", drivers=second)
     if LAPTOP:
         ntfs_rw_probe(f, "after Windows' first start and its ACPI shutdown")
     return result["ok"]
 
 
-def windows_run(f: Flavor, attempt: int) -> dict:
+def windows_run(f: Flavor, attempt: int, midsetup: float | None = None) -> dict:
     """One run of the VM from checkpoint 1, until Windows has had time to reach its sign-in screen."""
     nv = nvram(f.vars)
     print(f"      attempt {attempt}. NVRAM at power on: {describe(nv)}  SecureBootEnable={nv.get('secure_boot_enable', b'').hex()}", flush=True)
@@ -607,10 +685,18 @@ def windows_run(f: Flavor, attempt: int) -> dict:
     res: dict = {"ok": False, "crashed": False, "setup_at": None, "task_at": None, "shim_at": None,
                  "first_at_setup": None}
     last_shot, last_digest, last_describe = -999.0, "", ""
-    same, blue = 0, 0.0
+    same, blue, midsetup_done = 0, 0.0, False
     try:
         while True:
             elapsed = time.time() - started
+            if midsetup is not None and not midsetup_done and elapsed >= midsetup and res["setup_at"] is None:
+                # A consistent copy of the disk while Windows is still setting itself up: C:\\Drivers is there only now.
+                midsetup_done = True
+                vm.monitor("stop")
+                copy_started = time.time()
+                subprocess.run(["cp", "--sparse=always", str(f.disk), str(WORK / f"{f.tag}-midsetup.img")], check=True)
+                vm.monitor("cont")
+                print(f"      [{elapsed / 60:5.1f} min] disk copied while the VM was paused ({time.time() - copy_started:.0f} s)", flush=True)
             if "KVM: entry failed" in vm.text():
                 res["crashed"] = True
                 print(f"      [{elapsed / 60:5.1f} min] QEMU reports: KVM: entry failed, hardware error 0x0", flush=True)
@@ -678,7 +764,7 @@ def windows_run(f: Flavor, attempt: int) -> dict:
     return res
 
 
-def check_windows_files(f: Flavor, when: str) -> None:
+def check_windows_files(f: Flavor, when: str, drivers: bool = False) -> None:
     """Read the Windows disk offline (the VM is stopped): the logs of the two scripts and the scheduled task."""
     log(f"E2E-files [{f.tag}] the Windows disk, read offline, {when}")
     with offline(f.disk) as mounts:
@@ -713,6 +799,56 @@ def check_windows_files(f: Flavor, when: str) -> None:
                 got = subprocess.run(["hivexget", str(windows / "Windows/System32/config/SYSTEM"),
                                       rf"\ControlSet001\Control\{key}", value], capture_output=True, text=True)
                 check(got.stdout.strip() == "0", rf"registry: HKLM\SYSTEM\...\Control\{key}\{value} = 0", (got.stdout + got.stderr).strip())
+        if LAPTOP:
+            scripts = windows / "Windows/Setup/Scripts"
+            xml = scripts / "archinstall-wifi.xml"
+            check(xml.exists(), r"C:\Windows\Setup\Scripts\archinstall-wifi.xml still exists (a VM has no Wi-Fi adapter)")
+            check((scripts / "archinstall-wifi.ps1").exists(), r"C:\Windows\Setup\Scripts\archinstall-wifi.ps1 exists")
+            wifi_log = windows / "Windows/Temp/archinstall-wifi.log"
+            check(wifi_log.exists(), r"C:\Windows\Temp\archinstall-wifi.log exists")
+            wifi_text = read_text(wifi_log) if wifi_log.exists() else ""
+            print(indent(wifi_text))
+            (SHOTS / f"{f.tag}-{when.split()[0]}-archinstall-wifi.log").write_text(wifi_text)
+            check("not added yet" in wifi_text and "trying again later" in wifi_text,
+                  "the Wi-Fi log says 'not added yet ... trying again later' (nothing to join with: a VM has no Wi-Fi adapter)", wifi_text[-400:])
+            task_file = windows / "Windows/System32/Tasks/ArchInstallWifi"
+            task_xml = read_text(task_file) if task_file.exists() else ""
+            check(task_file.exists(), "the scheduled task ArchInstallWifi exists")
+            check("BootTrigger" in task_xml and "<Interval>PT15M</Interval>" in task_xml and "<Duration>P2D</Duration>" in task_xml,
+                  "...with an AtStartup trigger and a repetition every 15 minutes for 2 days", task_xml[:700])
+            if xml.exists():
+                try:
+                    control, aces = decode_dacl(os.getxattr(str(xml), "system.ntfs_acl"))
+                    sids = sorted({sid for _, _, sid in aces})
+                    print(f"      ACL of archinstall-wifi.xml: protected={bool(control & 0x1000)} ACEs={[(k, hex(m), sid) for k, m, sid in aces]}")
+                    check(sids == ["S-1-5-18", "S-1-5-32-544"] and bool(control & 0x1000),
+                          "archinstall-wifi.xml is readable only by SYSTEM (S-1-5-18) and Administrators (S-1-5-32-544), inheritance removed", str(sids))
+                except OSError as exc:
+                    check(False, "the ACL of archinstall-wifi.xml can be read from the ntfs-3g mount", str(exc))
+            bootlog = windows / "Windows/Temp/archinstall-bootorder.log"
+            texts = {"finish log": read_text(windows / "Windows/Temp/archinstall-finish.log") if (windows / "Windows/Temp/archinstall-finish.log").exists() else "",
+                     "wifi log": wifi_text, "boot order log": read_text(bootlog) if bootlog.exists() else ""}
+            check(all("wifi-test-pass-2026" not in text for text in texts.values()), "the Wi-Fi passphrase appears in no Windows log (finish, wifi, boot order)")
+            finish_text = texts["finish log"]
+            check("Wi-Fi" in finish_text or "wi-fi" in finish_text.lower(), "the finish log has its Wi-Fi section ('no Wi-Fi adapter yet: a task will add the Wi-Fi profile')", finish_text[-600:])
+        if drivers:
+            finish_text = read_text(windows / "Windows/Temp/archinstall-finish.log") if (windows / "Windows/Temp/archinstall-finish.log").exists() else ""
+            for line in finish_text.splitlines():
+                if "driver" in line.lower() or "Drivers" in line:
+                    print(f"      finish log: {line[:200]}")
+            check("drivers staged in C:\\Drivers" in finish_text, "the finish log has its driver section ('drivers staged in C:\\Drivers: N INF file(s), M in the Windows driver store')", finish_text[-800:])
+            stored = re.search(r"(\d+) INF file\(s\), (\d+) in the Windows driver store", finish_text)
+            check(bool(stored) and int(stored.group(2)) >= 1, "...and at least one of them is in the Windows driver store", stored.group(0) if stored else "no match")
+            check("C:\\Drivers deleted" in finish_text and not (windows / "Drivers").exists(), "the finish script deleted C:\\Drivers (and it is gone)")
+            setupapi = windows / "Windows/INF/setupapi.dev.log"
+            if setupapi.exists():
+                lines = [line for line in read_text(setupapi).splitlines() if "c:\\drivers" in line.lower()]
+                (SHOTS / f"{f.tag}-setupapi-drivers.txt").write_text("\n".join(lines))
+                for line in lines[:8]:
+                    print(f"      setupapi.dev.log: {line.strip()[:200]}")
+                check(bool(lines), "setupapi.dev.log shows the drivers being installed from C:\\Drivers", str(setupapi))
+            else:
+                check(False, "setupapi.dev.log exists", str(setupapi))
         task = windows / "Windows/System32/Tasks/ArchInstallBootOrder"
         check(not task.exists(), "the scheduled task ArchInstallBootOrder no longer exists (it unregistered itself)")
         scripts = windows / "Windows/Setup/Scripts"
@@ -1094,7 +1230,16 @@ def phase_inspect(f: Flavor) -> bool:
     return True
 
 
+def phase_reinstall(f: Flavor) -> bool:
+    return phase_install(f, second=True)
+
+
+def phase_windows2(f: Flavor) -> bool:
+    return phase_windows(f, second=True)
+
+
 PHASES = {"install": phase_install, "windows": phase_windows, "mok": phase_mok, "boot": phase_boot_windows,
+          "reinstall": phase_reinstall, "windows2": phase_windows2,
           "inspect": phase_inspect, "recover": phase_recover}
 ALL_PHASES = ("install", "windows", "mok", "boot", "inspect")  # "recover" only when asked for
 

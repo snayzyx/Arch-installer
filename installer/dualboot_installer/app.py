@@ -8,6 +8,7 @@ from .config import InstallConfig
 from .screens.arch import AccountsScreen, SoftwareScreen, StorageScreen
 from .screens.base import WizardScreen
 from .screens.disk import DiskScreen, LayoutScreen
+from .screens.extras import ExtrasScreen
 from .screens.install import InstallScreen
 from .screens.network import NetworkScreen
 from .screens.region import RegionScreen
@@ -28,6 +29,7 @@ STEPS: tuple[type[WizardScreen], ...] = (
     AccountsScreen,
     StorageScreen,
     SoftwareScreen,
+    ExtrasScreen,
     WindowsSourceScreen,
     WindowsAccountScreen,
     SecureBootScreen,
@@ -50,6 +52,7 @@ class InstallerApp(App[None]):
         # choices instead of re-applying country defaults.
         self.region_touched = False
         self.windows_touched = False
+        self.extras_touched = False
 
     def on_mount(self) -> None:
         self.push_screen(self._make(0))

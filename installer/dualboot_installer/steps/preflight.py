@@ -11,6 +11,8 @@ from ..config import InstallConfig
 from .arch import cpu_ucode, package_list, strategy_of, wants_laptop
 from .bootloader import fetch_shim
 from .context import TARGET, Context, StepError
+from .dotfiles import check_sources
+from .windows_drivers import harvest_drivers
 from .storage import CRYPT_HOME, CRYPT_ROOT
 from .windows import check_source
 
@@ -70,7 +72,12 @@ def preflight(ctx: Context) -> None:
         fetch_shim(ctx)  # download and verify now, not after the disk has been erased
     if not cfg.partial:
         check_source(ctx)  # the Windows image must be usable before anything is erased
+    check_sources(ctx)  # the desktop shell downloads must answer before anything is erased
 
     # A package name that does not exist must fail here, not halfway through pacstrap.
     ctx.run("pacman", "-Sy", "--noconfirm", quiet=True)
     ctx.run("pacman", "-Sp", "--print-format", "%n", *package_list(cfg, cpu_ucode(), laptop=wants_laptop(cfg)), quiet=True)
+
+    # Last, because it mounts the disk's partitions (read-only) for a moment: keep the drivers of the Windows
+    # that is on this disk before it is erased.
+    harvest_drivers(ctx)

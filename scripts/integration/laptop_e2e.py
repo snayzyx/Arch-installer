@@ -398,6 +398,7 @@ def disk(vm: LaptopVm, w) -> None:
 
 def walk(vm: LaptopVm, w, desktop: str = "Minimal") -> bool:
     welcome(vm, w)
+    w.total = w.read_total()
     check(w.next(2), "Welcome -> Region")
     check(w.fill("Country", "fran", clear=False), "Region: filter")
     vm.keys("enter")
@@ -419,27 +420,42 @@ def walk(vm: LaptopVm, w, desktop: str = "Minimal") -> bool:
     check(w.next(8), "Storage -> Software")
     w.snapshot("software")
     check(w.choose("Desktop", desktop), f"Software: {desktop}")
-    check(w.next(9), "Software -> Windows image")
+    check(w.next(9), "Software -> " + ("Extras" if w.total == 14 else "Windows image"))
+    if w.total == 14:
+        if desktop == "Hyprland":
+            t.extras_hypr_defaults(vm, w, "Laptop: ")
+        else:
+            t.extras_defaults_minimal(vm, w, "Laptop: ")
     check(w.choose("Where does the ISO come from", "ISO file I already have")
           if not w.has(r"included in this installer") else True, "Windows image: source")
     if w.has(r"Path of the ISO file"):
         w.fill("Path of the ISO file", "/tmp/fake-windows.iso")
-    check(w.next(10), "Windows image -> Windows account")
+    check(w.next(w.n("winaccount")), "Windows image -> Windows account")
     w.fill("Computer name", "WINLAPTOP")
     w.fill("User name", "alice")
     w.fill("Password", "win-pw")
     w.fill("Confirm the password", "win-pw")
-    check(w.next(11), "Windows account -> Secure Boot")
+    check(w.next(w.n("secureboot")), "Windows account -> Secure Boot")
     w.fill("Enrollment password", "Abcd1234")
     w.fill("Confirm the enrollment password", "Abcd1234")
-    check(w.next(12), "Secure Boot -> Summary")
-    summary = vm.screen_text()
-    w.snapshot("summary")
+    check(w.next(w.n("summary")), "Secure Boot -> Summary")
+    w.snapshot("summary-top")
+    summary = w.summary_text("Type /dev/nvme0n1 to confirm")
+    w.snapshot("summary-bottom")
     check(re.search(r"Laptop extras\s+yes:", summary) is not None, "Summary: 'Laptop extras: yes: ...'")
-    check(re.search(rf"Wi-Fi\s+{SSID} \(kept for the installed system\)", summary) is not None,
-          f"Summary: 'Wi-Fi: {SSID} (kept for the installed system)'")
+    check(re.search(rf"Wi-Fi\s+{SSID} \(kept for ", summary) is not None,
+          f"Summary: 'Wi-Fi: {SSID} (kept for ...)' (the installer says 'kept for Arch Linux' now)")
     check("/dev/nvme0n1" in summary and re.search(r"nvme0n1", summary) is not None, "Summary: names /dev/nvme0n1")
     check(not any(secret in summary for secret in SENSOR_SECRETS), "Summary: no secret is displayed")
+    if w.total == 14:
+        if desktop == "Hyprland":
+            check(re.search(r"Developer tools\s+Languages and build tools, Command line helpers", summary) is not None
+                  and re.search(r"Applications\s+VSCodium, LibreWolf, Postman", summary) is not None
+                  and re.search(r"Desktop shell\s+default Hyprland setup", summary) is not None,
+                  "Summary: Developer tools / Applications (VSCodium, LibreWolf, Postman) / Desktop shell (default Hyprland setup)")
+        else:
+            check(re.search(r"Developer tools\s+Languages and build tools, Command line helpers", summary) is not None
+                  and re.search(r"Applications\s+none", summary) is not None, "Summary: the recommended developer tools, no applications")
     check(w.fill("Type /dev/nvme0n1 to confirm", "/dev/nvme0n1"), "Summary: the confirmation is typed")
     return True
 
@@ -513,7 +529,13 @@ def inspect(disk_img: Path, desktop: str) -> None:
             check(svc in enabled, f"Disk: {svc} is enabled (symlink in /etc/systemd/system)", " ".join(enabled))
         grub = (esp / "grub/grub.cfg").read_text(errors="replace")
         check("/vmlinuz-linux" in grub and "Windows 11" in grub, "Disk: GRUB has the Arch and the Windows entries")
+        pkgs = sh(f"ls {root}/var/lib/pacman/local")
+        have = lambda name: re.search(rf"^{re.escape(name)}-[0-9]", pkgs, re.MULTILINE) is not None  # noqa: E731
+        check(have("git") and have("nodejs") and have("neovim"), "Disk: the recommended developer tools are installed")
         if desktop == "Hyprland":
+            check(have("librewolf") and (have("yay") or have("yay-bin")) and have("vscodium-bin") and have("postman-bin"),
+                  "Disk: LibreWolf, yay, vscodium-bin and postman-bin are installed", pkgs[:0])
+            check(not (root / "etc/sudoers.d/99-archinstall-aur").exists(), "Disk: the temporary sudoers file is gone")
             home_dir = mnt / "home"
             home_dir.mkdir(exist_ok=True)
             sh(f"mount -o ro,subvol=@home {loop}p3 {home_dir}")

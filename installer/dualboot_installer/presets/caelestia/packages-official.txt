@@ -1,0 +1,9 @@
+# Official repositories (pacman), verified with `pacman -Si` on 2026-10-25.
+# The installer already installs Hyprland, the portals, PipeWire, NetworkManager, bluez and kitty.
+# pipewire-jack MUST be installed before any AUR build: otherwise libcava pulls jack2 and the dots' pipewire
+# component fails with "pipewire-jack and jack2 are in conflict".
+pipewire-jack git base-devel
+# Started by the dots (night light and location): they do not install them themselves.
+gammastep geoclue
+# The shell needs the Bluetooth and power-profile daemons (enabled by the installer).
+bluez power-profiles-daemon upower

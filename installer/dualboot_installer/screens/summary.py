@@ -11,15 +11,19 @@ from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Input, Static
 
+from .. import extras
 from ..config import InstallConfig, WindowsConfig
 from ..drivers import packages_for
 from ..layout import ROLE_ESP, ROLE_HOME, ROLE_ROOT, ROLE_SHARED, ROLE_WINDOWS
 from ..secureboot import STRATEGY_LABELS
 from ..steps.arch import wants_laptop
+from ..steps.windows_drivers import bundled_driver_count
 from ..util import human_size
 from ..validate import problems
+from ..windows_unattend import wifi_supported
 from ..widgets import field, text_input
 from .base import WizardScreen
+from .extras import short_label
 
 
 def _section(title: str, rows: list[tuple[str, str]]) -> Group:
@@ -43,6 +47,24 @@ def describe_windows_source(w: WindowsConfig) -> str:
     return f"local file {w.iso_path}"
 
 
+def describe_drivers() -> str:
+    """What Windows gets in drivers: those of the Windows already on the disk, and the ones in the installer."""
+    text = ("the Wi-Fi, network and Bluetooth drivers of the Windows already on this disk are kept, "
+            "if there is one that can be read (not encrypted)")
+    bundled = bundled_driver_count()
+    return text + (f"; plus {bundled} bundled in this installer" if bundled else "")
+
+
+def describe_wifi(cfg: InstallConfig) -> str:
+    """The Wi-Fi network used for the installation and which of the new systems get it."""
+    net = cfg.network
+    if not net.wifi_ssid:
+        return "none"
+    if not wifi_supported(net.wifi_security):
+        return f"{net.wifi_ssid} (not copied to the new systems: only open and WPA2-Personal networks can be)"
+    return f"{net.wifi_ssid} (kept for Arch Linux" + ("" if cfg.partial else " and for Windows") + ")"
+
+
 def build_summary(cfg: InstallConfig) -> Group:
     d, a, w, sb = cfg.disk, cfg.arch, cfg.windows, cfg.secureboot
     layout = cfg.layout()
@@ -64,6 +86,8 @@ def build_summary(cfg: InstallConfig) -> Group:
         parts_table.add_row(str(p.number), p.label, f"{p.size_mib / 1024:.1f} GiB", use)
 
     gpu_packages = packages_for(a.gpu_profiles, a.kernel)
+    preset = extras.selected_preset(a)
+    shell = (preset.label if preset else "default Hyprland setup") if extras.has_desktop(a) else "none (no desktop)"
     windows_source = describe_windows_source(w)
     windows_status = ("NOT installed (partial mode): its partition stays empty" if cfg.partial
                       else "installed automatically: Windows Setup starts on the first restart")
@@ -84,8 +108,12 @@ def build_summary(cfg: InstallConfig) -> Group:
             ("Graphics", ", ".join(gpu_packages) or "none"),
             ("Laptop extras", "yes: power profiles, Bluetooth, battery, SOF audio firmware"
                               if wants_laptop(cfg) else "no"),
-            ("Wi-Fi", f"{cfg.network.wifi_ssid} (kept for the installed system)" if cfg.network.wifi_ssid else "none"),
+            ("Wi-Fi", describe_wifi(cfg)),
             ("AUR helper", a.aur_helper),
+            ("Developer tools", ", ".join(short_label(extras.DEV_GROUPS[g][0]) for g in a.dev_groups
+                                          if g in extras.DEV_GROUPS) or "none"),
+            ("Applications", ", ".join(short_label(app.label) for app in extras.selected_apps(a)) or "none"),
+            ("Desktop shell", shell),
             ("Extra packages", " ".join(a.extra_packages) or "none"),
             ("Swap", "zram"),
         ]),
@@ -94,6 +122,7 @@ def build_summary(cfg: InstallConfig) -> Group:
             ("Image", f"{w.edition}, {w.language_name}, {windows_source}"),
             ("Computer / user", f"{w.computer_name} / {w.username} (local administrator)"),
             ("Time zone / keyboard", regional),
+            *([] if cfg.partial else [("Drivers", describe_drivers())]),
             *([] if cfg.partial else [("Tweak", tweak) for tweak in WindowsConfig.TWEAKS]),
         ]),
         _section("Boot", [

@@ -14,6 +14,8 @@ PROFILE="$WORK/profile"
 ISOFS="$WORK/work/iso" # the tree mkarchiso turns into the ISO
 
 WINDOWS_ISO="${WINDOWS_ISO:-}"
+# Optional: a folder of extracted driver packages to carry in the image (see attach_drivers).
+DRIVERS_DIR="${DRIVERS_DIR:-}"
 WINDOWS_DIR=windows # inside the ISO: /windows
 WINDOWS_FILE=Windows11.iso
 
@@ -35,6 +37,11 @@ SHIM_SHA256="0a119f3488e5da27ca55c1864ee8e131afa5ecf27689385ba09b805eb00dd608"
 
 log() { printf '\n==> %s\n' "$*"; }
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
+
+# Bind mounts into the ISO tree (the Windows ISO, the drivers), undone when the script ends.
+MOUNTS=()
+cleanup_mounts() { local m; for m in "${MOUNTS[@]}"; do umount "$m" 2>/dev/null || true; done; }
+trap cleanup_mounts EXIT
 
 # Download (once, into the cached volume) and verify the shim, then put it on the ISO.
 embed_shim() {
@@ -88,7 +95,19 @@ attach_windows_iso() {
   install -m 0644 "$WORK/manifest.json" "$ISOFS/$WINDOWS_DIR/manifest.json"
   : >"$ISOFS/$WINDOWS_DIR/$WINDOWS_FILE"
   mount --bind "$WINDOWS_ISO" "$ISOFS/$WINDOWS_DIR/$WINDOWS_FILE"
-  trap 'umount "$ISOFS/$WINDOWS_DIR/$WINDOWS_FILE" 2>/dev/null || true' EXIT
+  MOUNTS+=("$ISOFS/$WINDOWS_DIR/$WINDOWS_FILE")
+}
+
+# Driver packages (extracted, with their .inf) for the new Windows: bind-mounted the same way into
+# /windows/drivers on the ISO. The installer copies them to C:\Drivers, where Windows installs them.
+attach_drivers() {
+  [[ -d "$DRIVERS_DIR" ]] || die "Drivers folder not found: $DRIVERS_DIR"
+  find "$DRIVERS_DIR" -iname '*.inf' -print -quit | grep -q . \
+    || die "$DRIVERS_DIR holds no .inf file: extract the driver packages (not an .exe or .msi) into it first."
+  install -d "$ISOFS/$WINDOWS_DIR/drivers"
+  mount --bind "$DRIVERS_DIR" "$ISOFS/$WINDOWS_DIR/drivers"
+  MOUNTS+=("$ISOFS/$WINDOWS_DIR/drivers")
+  log "Bundled drivers: $(find "$DRIVERS_DIR" -iname '*.inf' | wc -l) INF file(s), $(du -sh "$DRIVERS_DIR" | cut -f1)"
 }
 
 log "Preparing the archiso profile"
@@ -135,6 +154,10 @@ cat >> "$PROFILE/profiledef.sh" <<'EOF'
 file_permissions+=(
   ["/usr/local/bin/archinstall-launcher"]="0:0:755"
 )
+
+# mksquashfs on all the processors and a quarter of the RAM can exhaust the 16 GB of Docker's VM when a test
+# VM runs next to the build ("xz uncompress failed"): fewer threads and a cap on its memory cost a minute or two.
+airootfs_image_tool_options+=('-processors' '8' '-mem' '2G')
 EOF
 
 grep -rlE 'Arch Linux install medium' "$PROFILE/efiboot" "$PROFILE/syslinux" "$PROFILE/grub" 2>/dev/null \
@@ -155,6 +178,7 @@ if find "$PROFILE/efiboot" "$PROFILE/syslinux" "$PROFILE/grub" -type f ! -name '
 fi
 
 [[ -z "$WINDOWS_ISO" ]] || attach_windows_iso
+[[ -z "$DRIVERS_DIR" ]] || attach_drivers
 
 # 6. Build. The image is written inside the container first: a 10 GB file written straight
 # to a folder shared with Windows was seen to vanish. It is copied and re-verified afterwards.
@@ -173,6 +197,14 @@ if [[ -n "$WINDOWS_ISO" ]]; then
   found="$(bsdtar -tvf "$ISO_BUILT" 2>/dev/null | awk '$NF ~ /(^|\/)windows\/Windows11\.iso$/ { print $5 }' || true)"
   echo "expected $expected bytes, image lists: ${found:-<nothing>}"
   [[ "$found" == "$expected" ]] || die "The Windows ISO is missing or truncated inside the image."
+fi
+
+if [[ -n "$DRIVERS_DIR" ]]; then
+  log "Checking that the drivers are inside the image"
+  expected="$(find "$DRIVERS_DIR" -type f | wc -l)"
+  found="$(bsdtar -tf "$ISO_BUILT" 2>/dev/null | grep -E '^(\./)?windows/drivers/.*[^/]$' | wc -l || true)"
+  echo "expected $expected files, image lists: $found"
+  [[ "$found" == "$expected" ]] || die "The drivers are missing or incomplete inside the image."
 fi
 
 log "Computing the checksum"

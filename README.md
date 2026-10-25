@@ -22,6 +22,7 @@ your own ISO, and leaves you with a boot menu that lists both systems.
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
 - [The wizard, screen by screen](#the-wizard-screen-by-screen)
+- [Developer tools, applications and desktop shells](#developer-tools-applications-and-desktop-shells)
 - [Secure Boot](#secure-boot)
 - [Where the Windows ISO comes from](#where-the-windows-iso-comes-from)
 - [Disk layout](#disk-layout)
@@ -30,7 +31,6 @@ your own ISO, and leaves you with a boot menu that lists both systems.
 - [Troubleshooting](#troubleshooting)
 - [Questions](#questions)
 - [Status and testing](#status-and-testing)
-- [Planned](#planned)
 - [Repository layout](#repository-layout)
 - [Reporting a problem](#reporting-a-problem)
 - [License and trademarks](#license-and-trademarks)
@@ -45,6 +45,12 @@ your own ISO, and leaves you with a boot menu that lists both systems.
 - Either a **ready-to-use Hyprland desktop** (SDDM login, waybar, wofi, kitty, PipeWire,
   NetworkManager applet, function keys, touchpad settings) or a minimal system with no desktop.
 - Optional AUR helper (`paru` or `yay`) and any extra packages you name.
+- **Developer tools**, ticked by default: git, Node.js (npm, pnpm), Python (pip, pipx, virtualenv), Go, Rust,
+  cmake, ninja, gdb, GitHub CLI, ripgrep, fd, fzf, tmux, neovim, httpie, and optionally Docker.
+- **Applications** with the Hyprland desktop, ticked by default: **VSCodium**, **LibreWolf** and **Postman**.
+- A choice of **desktop shells (dotfiles)**: MacShell + MacOS-Like icons, Revo Shell, or Caelestia, always
+  downloaded in their latest version while installing. See [Developer tools, applications and desktop
+  shells](#developer-tools-applications-and-desktop-shells).
 - Region, locale, keyboard layout, host name, user (with `sudo`) and root password.
 
 **Windows 11**, installed unattended by Windows Setup from **your own ISO**
@@ -55,6 +61,7 @@ your own ISO, and leaves you with a boot menu that lists both systems.
   Windows disk), a small debloat, reduced telemetry, and the TPM / RAM / CPU requirement checks
   bypassed (unsupported by Microsoft).
 - If the firmware holds a Windows licence key (most laptops sold with Windows do), it is used.
+- The **Wi-Fi network** you used for the installation is added to Windows too (WPA2-Personal or open).
 
 **Boot**
 - A **signed GRUB** with Arch Linux as the default entry (5 seconds) and a Windows 11 entry.
@@ -67,7 +74,7 @@ your own ISO, and leaves you with a boot menu that lists both systems.
 
 1. You **build the ISO** on Windows with Docker; your Windows 11 ISO is bundled into it.
 2. You write it to a USB stick and boot it. The wizard starts by itself.
-3. You answer the wizard (13 screens) and confirm the summary, which names the disk to erase.
+3. You answer the wizard (14 screens) and confirm the summary, which names the disk to erase.
 4. The installer erases the disk, installs Arch Linux and GRUB, prepares Windows Setup on a
    dedicated partition, and makes the **first restart** start Windows Setup.
 5. Windows installs itself and restarts several times. A scheduled task then puts GRUB back at the
@@ -135,13 +142,57 @@ in the firmware. More detail and recovery steps: [docs/FIRST-INSTALL.md](docs/FI
 | 6 | Accounts | Host name, user, passwords, root |
 | 7 | Storage | Root file system, optional LUKS2 encryption |
 | 8 | Software | Kernel, graphics drivers, desktop, AUR helper, extra packages |
-| 9 | Windows source | Bundled ISO, a file, or a link; edition |
-| 10 | Windows account | Computer name, local account, optional separate time zone and keyboard |
-| 11 | Secure Boot | Method (Automatic is right for almost everyone) and the key enrollment password |
-| 12 | Summary | Everything in one place; confirm by typing the disk |
-| 13 | Installation | Live progress; Esc, Ctrl+C and Ctrl+Q are ignored while it runs |
+| 9 | Extras | Developer tools, applications (VSCodium, LibreWolf, Postman) and a desktop shell (dotfiles) |
+| 10 | Windows source | Bundled ISO, a file, or a link; edition |
+| 11 | Windows account | Computer name, local account, optional separate time zone and keyboard |
+| 12 | Secure Boot | Method (Automatic is right for almost everyone) and the key enrollment password |
+| 13 | Summary | Everything in one place; confirm by typing the disk |
+| 14 | Installation | Live progress; Esc, Ctrl+C and Ctrl+Q are ignored while it runs |
 
 `Esc` goes back one screen and keeps what you entered.
+
+## Developer tools, applications and desktop shells
+
+Screen 9 offers three things, all optional:
+
+- **Developer tools**: *Languages and build tools* (git, Node.js with npm and pnpm, Python with pip, pipx
+  and virtualenv, Go, Rust, cmake, ninja, gdb), *Command line helpers* (GitHub CLI, ssh, jq, ripgrep, fd,
+  fzf, tmux, neovim, httpie) and *Docker* (you join the `docker` group, which is equivalent to root access;
+  off by default). They come from the Arch repositories and are installed with the system.
+- **Applications** (Hyprland desktop only): VSCodium and Postman are built from the AUR on the installed
+  system (`yay` is installed for that, a few minutes; a failure only prints a warning), LibreWolf comes from
+  the Arch repositories.
+- **Desktop shell (dotfiles)** (Hyprland desktop only), one of:
+
+| Preset | What it is | Extra time and disk on a laptop (estimates) |
+|---|---|---|
+| Default Hyprland setup | waybar, wofi, kitty: plain and light | none |
+| **MacShell + MacOS-Like icons** | a macOS-style menu bar, Dock and lock screen ([MacShell](https://github.com/0-ss/MacShell)) with macOS-like icons ([MacOS-Like](https://github.com/Scrimas/MacOS-Like)) | 5-10 minutes, about 1 GB |
+| **Revo Shell** (experimental) | several Quickshell shells, macOS-like by default ([revo-shell](https://github.com/vzbc/revo-shell)) | 15-25 minutes, about 5 GB |
+| **Caelestia** | a fluid, themed shell with bar, launcher, dashboard and lock screen ([caelestia-dots](https://github.com/caelestia-dots)) | 15-30 minutes, about 2 GB |
+
+How the desktop shells are installed, and why:
+
+- **Always the latest version, so only with a connection.** Nothing of them is stored in the ISO but a small
+  install script each: the projects are downloaded from GitHub and the AUR while installing. The choice is
+  disabled when the machine is offline.
+- **Checked before anything is erased.** The installer first makes sure that every source answers; if one
+  does not, it stops with "Nothing was changed".
+- **Safeguards, because the latest version of a third-party project can break.** Each script checks that the
+  files and options it relies on still exist. If the latest version fails, the preset is rolled back and
+  retried with the versions that were tested; if that fails too, the default Hyprland setup comes back and
+  the installation goes on. The installed commit is written in the installation log.
+- **These are third-party projects**, under their own licenses: MacShell is MIT; MacOS-Like, MacTahoe and
+  Caelestia are GPL-3.0; Revo Shell has **no license file** (it is only cloned on your machine, never
+  redistributed here). MacShell contacts online services at run time (weather, location from your IP
+  address, stock prices, lyrics) and imitates macOS without any link to Apple. Revo Shell loads many
+  components and starts a "performance" power profile in its own configuration (removed by this installer).
+- **What was checked:** each preset was installed by the real installer and then seen running on a screen in a
+  virtual machine (software rendering, keyboard layout correct); the glass and blur effects, the lock screens
+  and the Wi-Fi and Bluetooth panels were not exercised, and nothing was tried on a real GPU. Revo Shell prints
+  warnings and shows two bars, which is why it is labelled experimental.
+- Hyprland, Quickshell and these projects move fast: a preset that worked when this was written may need an
+  update later.
 
 ## Secure Boot
 
@@ -195,7 +246,17 @@ A laptop is detected from a battery or from the chassis type reported by the fir
 - **Wi-Fi:** the network you used during the installation is saved in the new system, so a laptop
   without an Ethernet port does not boot offline. Open and WPA-PSK networks are carried over;
   enterprise (802.1X) networks are not.
-- **Windows:** Fast Startup and hibernation off, and the firmware licence key used if there is one.
+- **Windows:** Fast Startup and hibernation off, the firmware licence key used if there is one, and the Wi-Fi
+  network of the installation added (open or WPA2-Personal; a WPA3-only or enterprise network has to be joined
+  by hand once).
+- **Windows drivers (Wi-Fi, network, Bluetooth):** a stock Windows ISO does not carry every Wi-Fi driver, and
+  with no network Windows cannot download the missing one. Before the disk is erased, the installer reads the
+  Windows that is already on it (read-only), keeps the packages that match this computer's network and
+  Bluetooth adapters (up to 600 MB), and gives them to the new Windows, which installs them while it sets
+  itself up. A factory Windows encrypted with BitLocker cannot be read: connect an Ethernet cable, or your
+  phone by USB (tethering), once, and Windows Update installs the Wi-Fi driver. You can also bundle drivers
+  in the ISO: `.\build.ps1 -DriversDir <folder of extracted driver packages>` (a folder with the `.inf`,
+  `.cat` and `.sys` files; an `.exe` or `.msi` installer has to be extracted first).
 - **Warnings on the first screen:** a RAID / Intel VMD storage mode (Windows Setup would not see the
   disk) and battery power.
 - **Console font** scaled for 4K panels.
@@ -234,6 +295,7 @@ python -m venv .venv
 | Windows Setup does not start after the first restart | In the firmware boot order, "Windows 11 Setup" must come before "ArchInstall". |
 | Blue screen, "Verification failed" at a boot | The key was not enrolled in time. Turn Secure Boot off, start Arch (it queues the enrollment again), restart and press a key within 10 seconds. |
 | Windows Setup sees no disk | The laptop is in RAID / Intel VMD mode: switch the storage mode to AHCI. |
+| Windows is installed but has no Wi-Fi | Its driver was not in the Windows ISO, and no Windows was readable on the disk to take it from (or it was BitLocker-encrypted). Connect an Ethernet cable or your phone by USB (tethering) once: Windows Update installs it. Next time, bundle it: `build.ps1 -DriversDir`. The installer's log (`C:\Windows\Temp\archinstall-finish.log`) says which drivers were given to Windows. |
 | An installation step fails | The log is `/var/log/archinstall.log` on the live system; run `archinstall-launcher` to start again. |
 | The Windows partition is read-only from Linux | It should not happen (Fast Startup is off). A Windows that was hibernated by hand needs a full restart. |
 
@@ -261,7 +323,7 @@ Setup. An `--answers` file holds secrets in clear text: delete it afterwards.
 
 The complete flow passes in virtual machines for both Secure Boot methods: the wizard, Arch Linux,
 Windows 11 installed unattended, key enrollment, and both systems booting from the GRUB menu, with an
-NVMe disk, Wi-Fi only and simulated laptop sensors. **254 unit and wizard tests pass.** The real
+NVMe disk, Wi-Fi only and simulated laptop sensors. **362 unit and wizard tests pass.** The real
 wizard was also driven key by key in VMs (hundreds of checks), and the installation steps run for
 real against disk images in containers.
 
@@ -270,14 +332,6 @@ The full list of what was verified, of the defects found and fixed, and of what 
 is in [docs/RESULTS.md](docs/RESULTS.md). The design and its reasons are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Every test script is described in
 [scripts/README.md](scripts/README.md).
-
-## Planned
-
-- Developer tools (Node.js, Python, Go, Rust, ...) and applications (VSCodium, LibreWolf, Postman)
-  offered by the wizard.
-- A choice of ready-made Hyprland desktop shells (dotfiles) on top of the default setup.
-
-The groundwork for the first one is in the code; it is not exposed in the wizard yet.
 
 ## Repository layout
 

@@ -1,0 +1,12 @@
+# Official repositories (pacman). Checked against `pacman -Si` on 2026-10-25.
+# MacShell / MacLock: the union of REQUIRED + OPTIONAL + LIBS of install.sh (so that no feature is silently off).
+awww bluez-utils brightnessctl cliphist curl fastfetch ffmpeg grim hypridle hyprland hyprlock hyprpicker hyprsunset
+imagemagick inotify-tools inter-font jq kitty libnotify mesa networkmanager noto-fonts noto-fonts-emoji
+papirus-icon-theme pipewire pipewire-pulse playerctl polkit power-profiles-daemon python qt6-declarative
+qt6-multimedia-ffmpeg qt6-shadertools qt6-svg qt6-wayland quickshell rsync slurp tar upower util-linux wf-recorder
+wireplumber wl-clipboard wtype xdg-desktop-portal-hyprland xdg-utils zenity
+# NOT in install.sh's list but needed (found by running it): the UI-sound generator imports numpy.
+python-numpy
+# MacOS-Like (icons): Pillow, rsvg-convert, rsync; gtk-update-icon-cache is called by MacTahoe's install.sh.
+python-pillow librsvg gtk-update-icon-cache hicolor-icon-theme git
+bluez

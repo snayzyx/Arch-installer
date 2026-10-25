@@ -7,6 +7,7 @@ and the tests all read the same lists.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # config.py imports the defaults from this module
@@ -56,20 +57,105 @@ RECOMMENDED_APPS = ["vscodium", "librewolf", "postman"]
 FALLBACK_AUR_HELPER = "yay"
 
 
+# The files of each preset (installation scripts, base Hyprland config, package list) live in
+# presets/<id>/. They are plain text, copied to the new system and run there as the new user.
+PRESET_DIR = Path(__file__).parent / "presets"
+
+
+def read_packages(preset_id: str) -> tuple[str, ...]:
+    """Package names of presets/<id>/packages-official.txt (comments start with #)."""
+    text = (PRESET_DIR / preset_id / "packages-official.txt").read_text(encoding="utf-8")
+    names = [word for line in text.splitlines() if not line.lstrip().startswith("#") for word in line.split()]
+    return tuple(dict.fromkeys(names))
+
+
 @dataclass(frozen=True)
 class Preset:
-    """A desktop shell with its dotfiles (only with the Hyprland desktop)."""
+    """A desktop shell with its dotfiles (only with the Hyprland desktop).
+
+    Nothing of it is stored in the ISO. Its scripts download the LATEST version of each project
+    from GitHub while installing, so the preset needs a connection. They print `RECIPE-RESULT`
+    lines (with the installed commit) and exit with a distinct code when the project changed in a
+    way they no longer understand.
+    """
 
     id: str
     label: str
     description: str = ""
-    packages: tuple[str, ...] = ()  # official repositories
-    aur_packages: tuple[str, ...] = ()
+    packages: tuple[str, ...] = ()  # official repositories, installed with the system
+    aur_packages: tuple[str, ...] = ()  # built from the AUR after the system is installed
+    aur_check: tuple[str, ...] = ()  # more AUR packages the preset's own installer pulls in: checked before the erase
+    aur_helper: str = ""  # the helper the preset's installer insists on (it replaces the person's choice)
+    sources: tuple[str, ...] = ()  # https URLs of the git repositories: checked before the disk is erased
+    scripts: tuple[str, ...] = ()  # files of presets/<id>/, run in this order as the new user
+    # Environment variables for the retry when the latest version failed: the commits that were tested.
+    fallback_env: tuple[tuple[str, str], ...] = ()
+    rollback: str = ""  # script that puts the default setup back after a failure
+    services: tuple[str, ...] = ()  # systemd units the shell needs, enabled by the installer (their packages are in `packages`)
+    cleanup: tuple[str, ...] = ()  # paths relative to the person's home that are safe to delete once the preset is installed
+    base_config: str = ""  # file of presets/<id>/ written as ~/.config/hypr/hyprland.lua (@KB_LAYOUT@ is replaced)
+    script_timeout_minutes: int = 60
 
 
 DOTFILES: dict[str, Preset] = {
     "none": Preset("none", "Default Hyprland setup", "waybar, wofi, kitty: a plain, light configuration"),
+    "macshell": Preset(
+        "macshell", "MacShell + MacOS-Like icons",
+        "a macOS-style menu bar, Dock and lock screen, with macOS-like icons",
+        packages=read_packages("macshell"),
+        sources=("https://github.com/0-ss/MacShell", "https://github.com/vinceliuice/MacTahoe-icon-theme",
+                 "https://github.com/Scrimas/MacOS-Like"),
+        scripts=("20-macshell.sh", "30-icons.sh", "40-verify.sh"),
+        fallback_env=(("MACSHELL_REF", "1bdb51870b621100fd2709f66c8f8e00ab17b9c4"),
+                      ("MACTAHOE_REF", "839848b9a8a38a92a6936e30c4abe35cc6f2546d"),
+                      ("MACOSLIKE_REF", "efbc63d48d52bbaf52e9a70fb18e0d0c3c0719b2")),
+        rollback="restore-default.sh",
+        services=("bluetooth.service", "power-profiles-daemon.service"),
+        cleanup=(".cache/archinstall",),  # MacShell and the icon installer copy their files, nothing links into the clones
+        base_config="hyprland-base.lua",
+    ),
+    "revo": Preset(
+        "revo", "Revo Shell (experimental)",
+        "several Quickshell shells, macOS-like by default; large (about 5 GB, 15-25 minutes) and the project "
+        "has no license",
+        packages=read_packages("revo"),
+        aur_packages=("mpvpaper", "python-pywal16", "ttf-rubik-vf", "kde-material-you-colors"),
+        sources=("https://github.com/vzbc/revo-shell",),
+        scripts=("20-revo.sh",),
+        fallback_env=(("REVO_REF", "72f7113c9530577acff57778246b0583324c3774"),),
+        rollback="restore-default.sh",
+        services=("bluetooth.service", "upower.service", "power-profiles-daemon.service"),
+        # The clone (about 225 MB) and pip's cache (about 700 MB with PySide6): nothing links into them.
+        cleanup=(".cache/archinstall", ".cache/pip"),
+    ),
+    "caelestia": Preset(
+        "caelestia", "Caelestia",
+        "a fluid, themed desktop shell (bar, launcher, dashboard, lock screen) with its Hyprland setup",
+        packages=read_packages("caelestia"),
+        aur_packages=("caelestia-cli",),
+        aur_check=("yay-bin", "caelestia-shell", "quickshell-git", "qt6-m3shapes-git", "libcava",
+                   "python-materialyoucolor", "ttf-rubik-vf", "pwvucontrol", "papirus-folders"),
+        aur_helper="yay",
+        sources=("https://github.com/caelestia-dots/caelestia", "https://github.com/caelestia-dots/cli",
+                 "https://github.com/caelestia-dots/shell", "https://git.outfoxxed.me/quickshell/quickshell",
+                 "https://github.com/soramanew/m3shapes"),
+        scripts=("20-caelestia.sh", "40-verify.sh"),
+        fallback_env=(("CAELESTIA_DOTS_REF", "c034621845453260b245692b13ce514e7371d735"),),
+        rollback="restore-default.sh",
+        services=("bluetooth.service", "power-profiles-daemon.service"),
+    ),
 }
+
+
+def base_hyprland_config(preset: Preset, xkb_layout: str) -> str:
+    """The default Hyprland setup in the form the preset needs (Lua), with the person's keyboard layout."""
+    text = (PRESET_DIR / preset.id / preset.base_config).read_text(encoding="utf-8")
+    return text.replace("@KB_LAYOUT@", xkb_layout)
+
+
+def preset_sources(preset: Preset) -> list[str]:
+    """URLs that must answer before the installation starts (the disk is not erased yet)."""
+    return list(preset.sources)
 
 
 def has_desktop(a: ArchConfig) -> bool:
@@ -98,7 +184,7 @@ def official_packages(a: ArchConfig) -> list[str]:
     packages += [app.package for app in selected_apps(a) if not app.aur]
     preset = selected_preset(a)
     if preset:
-        packages += preset.packages
+        packages += ["git", *preset.packages]
     return list(dict.fromkeys(packages))
 
 
@@ -113,6 +199,9 @@ def aur_packages(a: ArchConfig) -> list[str]:
 
 def effective_aur_helper(a: ArchConfig) -> str:
     """The helper to install: the chosen one, or the fallback when something needs the AUR."""
+    preset = selected_preset(a)
+    if preset is not None and preset.aur_helper:
+        return preset.aur_helper
     if a.aur_helper != "none":
         return a.aur_helper
     return FALLBACK_AUR_HELPER if aur_packages(a) else "none"
