@@ -77,20 +77,31 @@ table below).
 Known and left alone (cosmetic): the SDDM greeter shows `us` until the first key is pressed, and
 `root=UUID=...` appears twice on the kernel command line (same value).
 
-## Final acceptance of the delivered ISOs
+## Final acceptance of the delivered ISOs (version 2)
 
-ISOs built with `scripts\rebuild-all.ps1` (online and offline) were tested; their installer files were
-identical to the repository (`docker/verify-iso.sh`). The acceptance tests were run **on those exact
-files**:
+The ISOs were built with `scripts
+ebuild-all.ps1` (online and offline) and verified with `docker/verify-iso.sh`:
+the installer files, presets included, were identical to the repository, and the Windows image inside the
+offline ISO had the same SHA-256 as its source. The tests below ran **on those files** (or, where marked, on
+the same installer code installed by the same installer steps).
 
 | Test | Result |
 |---|---|
-| Wizard, laptop walk on the online ISO (NVMe, Wi-Fi only, simulated battery and VMD controller, Hyprland, `--partial`) | **111 checks, 0 failed**: the Network screen turns to "Connected" by itself about 5 s after Connect, `powerprofilesctl list` and `get` work in the installed system, the Wi-Fi profile is joined automatically, `Hyprland --verify-config` says `config ok`, Ctrl+Q is ignored during the install. `dist\tui-screens\final2\laptop-online\` |
-| Wizard, full pass on the offline ISO (France/btrfs/lts, then Germany/ext4/separate `/home`/local ISO file/Home) | **254 checks, 0 failed**; the staged Windows scripts hold the Fast Startup, hibernation and firmware-key steps. `dist\tui-screens\final2\offline-full\` |
-| Container scenarios on the shipped code | **all pass**: paru 62 checks (the prebuilt package fails the start check, the source package is built), yay 60, laptop 88 (hybrid Intel + NVIDIA packages, Wi-Fi profile 0600, `Hyprland --verify-config`), the HTTPS link survives one and two cut connections in a single run with an identical SHA-256, regressions 64 and 53. `dist\screens\containers\final\` |
-| Headless whole flow on the final offline ISO with the laptop answers (Secure Boot on and key not enrolled, TPM, NVMe) | **85 checks, 0 failed**: installer exit 0 in 2.7 min; Windows installs by itself and restarts onto Windows (no blue screen) before the boot-order task puts ArchInstall first; Fast Startup off, no `hiberfil.sys`, the Windows partition mounts read-write after a shutdown; MOK enrollment, then Arch with `SecureBoot=1`, `python-gobject` installed and `powerprofilesctl list` working; GRUB menu to the Windows lock screen. The VM hypervisor crashed once (`KVM: entry failed`, 4th time over all runs, not tied to the ISO); the harness resumed from its checkpoint. `dist\screens\e2e4\` |
+| **Headless whole flow with Windows**, offline ISO, laptop answers, Secure Boot on and key not enrolled, TPM, NVMe | **first installation: 104 checks passed**, 1 test expectation corrected (the plan has 13 steps now, all `done`). Installer exit 0 in 2.5 min; Windows installs by itself and restarts on Windows (no blue screen) before the boot-order task puts GRUB first; MOK enrollment; Arch with `SecureBoot=1`; GRUB menu to the Windows lock screen; Fast Startup and hibernation off, no `hiberfil.sys`, the Windows partition mounts read-write after a shutdown. **Wi-Fi in Windows**: the profile and its script are staged, `archinstall-wifi.log` says the profile could not be added yet (a VM has no Wi-Fi adapter: `wlansvc` is not running), the retry task `ArchInstallWifi` exists (at startup and every 15 minutes for two days), the XML is readable only by SYSTEM and Administrators, and the passphrase is in no log. `dist\screens\e2e5\` |
+| The real wizard, 14 screens, from the repository installer inside the VM (the same code as the ISO) | **745 checks, 0 failed** over 5 passes: the Extras screen (first-visit selection, live AUR note, Back/Next keeps an empty choice, minimal desktop, the desktop shells enabled online and disabled offline), two full installations with Windows staged, a laptop walk over simulated Wi-Fi, a real AUR build of `yay`, VSCodium and Postman. `dist	ui-screens\extras\` |
+| Real installer in containers: developer tools and applications; MacShell, Revo Shell and Caelestia | all pass, including the faults injected into the real engine (see the table above) |
+| The three desktop shells on a screen in a VM | see the table above; `dist\screens\preset-boot\` |
+| Unit and wizard tests | **367 passed**, lint clean |
+
+Not part of this run: a second installation over the first one, to see Windows install the harvested drivers
+from `C:\Drivers` (the harvest itself and the staging were proven separately, see above).
 
 ## NOT verified
+
+- **Windows installing the harvested drivers**: the drivers of this machine's adapters were read from a real Windows
+  and staged with `DriverPaths`, but a second installation over a Windows disk, to see the new Windows install
+  them from `C:\Drivers`, was not part of the final run. A real Wi-Fi adapter was never present in a test
+  (a VM has none): the profile import (`netsh wlan add profile`) was not seen succeeding.
 
 - **The desktop shells beyond a first screen**: the glass and blur effects, the lock screens (MacLock, Caelestia),
   Caelestia's launcher and dashboard, Revo Shell's own keybindings, and the Wi-Fi and Bluetooth panels (the VM has
