@@ -93,15 +93,21 @@ the same installer code installed by the same installer steps).
 | The three desktop shells on a screen in a VM | see the table above; `dist\screens\preset-boot\` |
 | Unit and wizard tests | **367 passed**, lint clean |
 
-Not part of this run: a second installation over the first one, to see Windows install the harvested drivers
-from `C:\Drivers` (the harvest itself and the staging were proven separately, see above).
+**Second installation over the first one** (the disk then holds a real Windows with a DriverStore): 63 checks
+passed, 1 test expectation replaced. The installer read the Windows driver store, kept the one package matching
+the machine's network card (`net1ic64.inf`, 819 KB, matched on `PCI\VEN_8086&DEV_10D3`), staged it under
+`sources\$OEM$\$1\Drivers`; all 16 answer files list `C:\Drivers` as a driver path; `C:\Drivers` was present
+during Setup, Windows processed the `PnpCustomizationsNonWinPE` component, and the finish script deleted the
+folder. The rest of the chain (boot order task, Fast Startup off, Wi-Fi files, no leaked passphrase) behaved as in
+the first installation. **Not proven**: Windows installing a driver that its ISO does not already contain (this
+network driver is in the ISO, so Windows had nothing new to install), and the second installation's own MOK,
+GRUB and Arch login phases (the same phases passed for the first one). `dist\screens\e2e5\`
 
 ## NOT verified
 
-- **Windows installing the harvested drivers**: the drivers of this machine's adapters were read from a real Windows
-  and staged with `DriverPaths`, but a second installation over a Windows disk, to see the new Windows install
-  them from `C:\Drivers`, was not part of the final run. A real Wi-Fi adapter was never present in a test
-  (a VM has none): the profile import (`netsh wlan add profile`) was not seen succeeding.
+- **Windows installing a driver it does not already have**: the harvest, the staging, `DriverPaths` and the clean-up
+  are proven (see above), but the only driver in the test was already in the Windows ISO. A real Wi-Fi adapter was
+  never present in a test (a VM has none): the profile import (`netsh wlan add profile`) was not seen succeeding.
 
 - **The desktop shells beyond a first screen**: the glass and blur effects, the lock screens (MacLock, Caelestia),
   Caelestia's launcher and dashboard, Revo Shell's own keybindings, and the Wi-Fi and Bluetooth panels (the VM has
