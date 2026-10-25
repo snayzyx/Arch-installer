@@ -1,0 +1,8 @@
+
+
+======== Config parsing result:
+
+/tmp/bad.lua:12: unknown config key 'input.touchpad.tap_to_clickx'
+/tmp/bad.lua:23: attempt to call a nil value (field 'closex')
+stack traceback:
+	/tmp/bad.lua:23: in main chunk

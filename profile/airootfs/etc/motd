@@ -1,0 +1,5 @@
+ArchInstall - Arch Linux + Windows 11 dual boot installer
+
+The installer starts automatically on the first virtual console (tty1).
+To start it again, run:  archinstall-launcher
+To try the interface without touching any disk:  archinstall-launcher --demo

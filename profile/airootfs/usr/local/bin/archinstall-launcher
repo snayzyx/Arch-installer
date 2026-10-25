@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Starts the ArchInstall TUI on the live medium.
+set -u
+
+if [[ ! -d /sys/firmware/efi ]]; then
+  echo "ArchInstall requires UEFI, but this system booted in legacy BIOS mode." >&2
+  echo "Reboot this medium in UEFI mode and try again." >&2
+  exit 1
+fi
+
+# Keep kernel messages from drawing over the interface.
+dmesg -n 1 2>/dev/null || true
+
+# Larger console font, readable on high-resolution screens: a 4K laptop panel needs a bigger one
+# than a 1080p screen (the console font is not scaled by the display).
+width=0
+if [[ -r /sys/class/graphics/fb0/virtual_size ]]; then
+  size="$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null)"
+  width="${size%%,*}"
+fi
+[[ "$width" =~ ^[0-9]+$ ]] || width=0
+font=ter-v20n
+if (( width >= 3000 )); then font=ter-v32n; elif (( width >= 2200 )); then font=ter-v28n; fi
+setfont "$font" 2>/dev/null || setfont ter-v20n 2>/dev/null || true
+
+export PYTHONPATH=/opt/archinstall
+export TERM="${TERM:-linux}"
+exec python -m dualboot_installer "$@"

@@ -1,0 +1,139 @@
+# Results
+
+State of the project on 2026-10-25, after the last test session. This file separates what was
+**run and observed** from what was only **written**. **Nothing here was tested on real hardware**:
+every boot, install and Windows setup below ran in QEMU/KVM virtual machines (UEFI firmware with
+enforced Secure Boot, a virtual TPM, an NVMe disk) or in privileged Docker containers.
+
+The evidence folders cited below (`dist\screens\...`, `dist\tui-screens\...`) are written by the test
+scripts (see [scripts/README.md](../scripts/README.md)) on the machine that runs them. `dist\` is
+git-ignored: they are not part of the repository, and rerunning the scripts regenerates them.
+
+## In one paragraph
+
+The installer installs Arch Linux and Windows 11 side by side from one ISO, with a GRUB signed for
+Secure Boot, and adapts to a laptop (power management, Bluetooth, Wi-Fi kept for the new system,
+Windows Fast Startup off, warnings for RAID/VMD storage and battery power). In virtual machines the
+complete flow worked: the real installer ran from the offline ISO, Windows installed itself
+unattended, the Secure Boot key was enrolled, and both systems booted from the GRUB menu, with the
+shim path and with the sbctl path. The defects those tests exposed were fixed and retested (see the
+table below).
+
+## Verified (observed in a test, with evidence)
+
+| What | How it was tested | Evidence |
+|---|---|---|
+| 254 unit and wizard tests | `python -m pytest` on Windows (Python 3.14, Textual 8.2.8) | run before the final build |
+| Arch install, many variants: shim+ext4, sbctl+xfs, shim+btrfs, shim+ext4+LUKS+`/home`, sbctl+btrfs+Hyprland, plus Windows staged with a shared NTFS partition + LUKS + `/home` + btrfs, and with xfs + `/home` + sbctl | the real install steps against a 110 GB disk image in a privileged container, 53-105 checks each, the result mounted again | `dist\screens\containers\SUMMARY.txt` |
+| AUR helpers | `yay` installs and starts; `paru-bin` did not start, now falls back to the source package (works) | same folder, scenarios 3a-3d |
+| Windows source = **HTTPS link** | nginx with a throw-away CA serving the real 9 GB ISO; same SHA-256 afterwards; connection cut at 1.6 GB, survived with `--retry-all-errors` | same folder, scenarios 4 and 4b |
+| **Whole flow from the offline ISO, shim path** | real installer (headless) -> Windows Setup starts by itself -> finishes by itself -> MOK enrollment -> GRUB menu -> Windows lock screen -> Arch login with `SecureBoot=1` | `dist\screens\e2e2\` (59 checks) |
+| **Whole flow, sbctl path** | firmware in Setup Mode + virtual TPM, keys enrolled by the installer, Windows installed and booted under those keys, Arch with Secure Boot enabled | `dist\screens\e2e2\` (50 checks) |
+| **Laptop run of the whole flow** (NVMe disk, `arch.laptop`, Wi-Fi profile) | same chain; Fast Startup and hibernation off (registry, no `hiberfil.sys`), the Windows partition mounts **read-write** under Linux after a normal shutdown (it did not before), finish log, firmware product key attempted with a fake ACPI MSDM table and never logged | `dist\screens\e2e3\` (83 checks) |
+| A missed 10-second MOK window | shim refuses GRUB; Secure Boot off, Arch starts and queues the key again, enrollment then works | 35 checks in `dist\screens\e2e2\` |
+| **The real interactive wizard** on the offline ISO | driven key by key in a VM: 13 screens, validations, back navigation, Esc/Ctrl+C/Enter during the install, two full installs, disk inspected afterwards | `dist\tui-screens\final\` (254 checks, 0 failed) |
+| **Laptop wizard walk** | NVMe disk (`nvme0n1p1`...), Wi-Fi only with no wired route (access point in a network namespace), simulated battery and RAID/VMD controller, install over Wi-Fi, installed system boots and joins the same network by itself, `Hyprland --verify-config` answers `config ok`, SDDM greeter appears | `dist\tui-screens\laptop\` (254 checks, 2 defects found and fixed) |
+| SDDM keyboard layout | typing the physical keys of `azerty` logs in, `qwerty` is refused: the French layout is used | `dist\tui-screens\sddm-keyboard\` |
+| ISO builds | online 1.6 GB and offline 10.7 GB; contents and checksums verified, installer files identical to the repository, Windows ISO inside has the same SHA-256 as the source, shim hash pinned | `docker/verify-iso.sh` output |
+| Booting the ISO as a **disk** (the USB case) | virtio disk, kernel command line as shipped | `/run/archiso/bootmnt` stays mounted |
+
+## Defects found by testing, and their state
+
+| Defect | Consequence | State |
+|---|---|---|
+| `fstab` written by `genfstab` used `/dev/...` and copied the live system's swap | first boot fell into emergency mode | fixed (hand-written, UUIDs only), verified |
+| GRUB image lacked the `bli` module | "prohibited by secure boot policy" at every boot under shim | fixed, verified |
+| Arch's `sbat.csv` older than the GRUB build | shim could refuse GRUB | fixed, verified |
+| The signed shim corrupted inside the ISO (CRLF conversion of a binary) | shim path would fail | fixed, hash checked at build and run time |
+| Windows Setup chain-loaded from GRUB fails (`0xc000000f`) | no Windows install | fixed: a firmware boot entry starts it, verified |
+| `sbctl` path does not boot without a TPM | GRUB: "verification requested but nobody cares" | fixed: sbctl only with Setup Mode **and** a TPM, otherwise shim |
+| The blue MOK screen drops the request after 10 s without a key | key never enrolled | mitigated: a service re-queues it at every boot; verified |
+| archiso unmounts the USB stick (`copytoram=auto`) | bundled Windows ISO unreachable | fixed (`copytoram=n` + label fallback), verified |
+| Back navigation lost the choice made on the screen | Summary showed another choice | fixed, verified in the VM wizard |
+| `pacstrap` failed once on a slow mirror and aborted the install | install failed after the disk was erased | fixed (3 attempts), unit test; no network failure was simulated |
+| GRUB moved first in the boot order too early | with Secure Boot on, Windows' last automatic restart landed on shim's blue screen | fixed (a scheduled task does it at the next start), **verified in the VM** |
+| `MOK_INSTRUCTIONS` text inexact | misleading advice | fixed |
+| No Wi-Fi in the installed system | a laptop without Ethernet boots offline | fixed (profile written), verified |
+| Windows Fast Startup left on | the Windows partition unusable (read-only) from Linux after "Shut down" | fixed, verified (read-write mount) |
+| Windows installed with a generic key hides the firmware licence | not activated on a laptop sold with Windows | implemented (`slmgr`); verified with a **fake** key only |
+| `paru-bin` built against another `libalpm` | paru installed but did not start | fixed (checks, falls back to source), verified |
+| `curl --retry` does not retry a dropped connection | link source aborted after the disk was erased | fixed (`--retry-all-errors`), verified |
+| `powerprofilesctl` missing `python-gobject` | the command crashed | fixed, see the final acceptance below |
+| Wi-Fi screen stayed on "Not connected" after connecting | Next blocked until Scan was pressed | fixed, unit test fails without the fix; see the final acceptance |
+| Ctrl+Q during the installation quit the wizard | half-installed disk | fixed (ignored while installing), verified in the VM |
+| `scripts/rebuild-all.ps1` passed `-SkipImage` as the output folder | the ISO landed in a folder named `-SkipImage` and the old one was verified | fixed |
+
+Known and left alone (cosmetic): the SDDM greeter shows `us` until the first key is pressed, and
+`root=UUID=...` appears twice on the kernel command line (same value).
+
+## Final acceptance of the delivered ISOs
+
+ISOs built with `scripts\rebuild-all.ps1` (online and offline) were tested; their installer files were
+identical to the repository (`docker/verify-iso.sh`). The acceptance tests were run **on those exact
+files**:
+
+| Test | Result |
+|---|---|
+| Wizard, laptop walk on the online ISO (NVMe, Wi-Fi only, simulated battery and VMD controller, Hyprland, `--partial`) | **111 checks, 0 failed**: the Network screen turns to "Connected" by itself about 5 s after Connect, `powerprofilesctl list` and `get` work in the installed system, the Wi-Fi profile is joined automatically, `Hyprland --verify-config` says `config ok`, Ctrl+Q is ignored during the install. `dist\tui-screens\final2\laptop-online\` |
+| Wizard, full pass on the offline ISO (France/btrfs/lts, then Germany/ext4/separate `/home`/local ISO file/Home) | **254 checks, 0 failed**; the staged Windows scripts hold the Fast Startup, hibernation and firmware-key steps. `dist\tui-screens\final2\offline-full\` |
+| Container scenarios on the shipped code | **all pass**: paru 62 checks (the prebuilt package fails the start check, the source package is built), yay 60, laptop 88 (hybrid Intel + NVIDIA packages, Wi-Fi profile 0600, `Hyprland --verify-config`), the HTTPS link survives one and two cut connections in a single run with an identical SHA-256, regressions 64 and 53. `dist\screens\containers\final\` |
+| Headless whole flow on the final offline ISO with the laptop answers (Secure Boot on and key not enrolled, TPM, NVMe) | **85 checks, 0 failed**: installer exit 0 in 2.7 min; Windows installs by itself and restarts onto Windows (no blue screen) before the boot-order task puts ArchInstall first; Fast Startup off, no `hiberfil.sys`, the Windows partition mounts read-write after a shutdown; MOK enrollment, then Arch with `SecureBoot=1`, `python-gobject` installed and `powerprofilesctl list` working; GRUB menu to the Windows lock screen. The VM hypervisor crashed once (`KVM: entry failed`, 4th time over all runs, not tied to the ISO); the harness resumed from its checkpoint. `dist\screens\e2e4\` |
+
+## NOT verified
+
+- **Any real hardware.** Firmwares differ; a real firmware may ignore `BootNext` (the code also
+  puts the temporary entry first in the boot order, which is what worked in the VM), may drop boot
+  entries (the fallback path is installed too), may not fall back to the next entry when shim
+  fails, or may behave differently with a hardware TPM.
+- **A real Intel VMD / RAID controller**: only the warning text is tested, with a faked `lspci`.
+  Windows Setup ran to the end on a virtual NVMe disk, but never behind such a controller.
+- **A real firmware Windows key**: `slmgr` was exercised with a fake key from a fake ACPI table.
+- Hardware features: Bluetooth, touchpad, function keys, brightness, suspend and hibernation,
+  HiDPI scaling, a hardware TPM.
+- A real Hyprland session (the configuration validates and the greeter works, the desktop itself
+  was not looked at), hybrid NVIDIA graphics at run time (the packages install).
+- 802.1X (enterprise) Wi-Fi is not carried over to the installed system.
+- Windows past the lock screen, other Windows languages, Windows with LUKS/btrfs/xfs in a full VM
+  install (the container tests stage it; the VM runs used ext4).
+- Windows activation with a real licence. Without a firmware key Windows is **not activated**.
+
+## Things to know
+
+- **No automatic download from Microsoft**, on purpose: the offline ISO, a local file, or a link
+  you paste (see the README).
+- The answer files on the `WINSETUP` partition hold the Windows password in Setup's obfuscated
+  form (not encryption). They are deleted when that partition is removed or reformatted at the
+  end of Windows Setup.
+- Recommended flow: leave **Secure Boot off** in the firmware until the Secure Boot key is
+  enrolled (the live ISO is unsigned anyway), then turn it on. If Secure Boot is on and the 10
+  seconds were missed, shim refuses to start GRUB: turn it off, start Arch (it queues the
+  enrollment again), restart and press a key in time.
+- On a laptop in **RAID / Intel VMD mode** Windows Setup cannot see the disk: set the storage
+  mode to AHCI in the firmware first (the wizard warns).
+- The GRUB menu may list a few extra firmware entries ("EFI Firmware Setup", "BootManagerMenuApp").
+- Building `paru` from the AUR (when the prebuilt package does not start) compiles Rust: several
+  minutes on a laptop. The step never stops the installation.
+
+## Test environment notes
+
+- Docker Desktop keeps its virtual disk on the system drive by default, and the test volumes
+  (`archinstall-live`, `archinstall-winimg`, `archinstall-tui2`, `archinstall-laptop`,
+  `archinstall-laptop2`) hold ISO copies and disk images of 10-100 GB each. A full drive crashes Docker:
+  keep room, or move the disk image (Docker Desktop > Settings > Resources > Advanced), and delete the
+  test volumes with `docker volume rm` when they are no longer needed. `archinstall-pkgcache` is the
+  package cache: worth keeping, it makes builds faster.
+- IDEs and cleanup tools may empty a folder named `out\`: the ISOs are built into `dist\`.
+- The QEMU/KVM runs that install Windows crashed with `KVM: entry failed, hardware error 0x0` four
+  times over all the runs, mostly while Docker was busy with something else. It is a nested
+  virtualization problem of the test machine, not of the product: the test harness resumes from its
+  checkpoint.
+
+## Where the tests are
+
+| Test | Command |
+|---|---|
+| Unit and wizard tests | `cd installer; python -m pytest` |
+| Install steps against a disk image, one variant | `.\scripts\test-install.ps1 -Strategy shim -Filesystem ext4 [-Luks -SeparateHome] [-Desktop hyprland] [-WindowsIso <iso>] [-Laptop] [-AurHelper paru] [-BootTest]` |
+| Whole flow in a VM | `.\scripts\live-test.ps1 -E2e shim -IsoInVolume <iso> [-Laptop]` |
+| Interactive wizard in a VM | `.\scripts\tui-e2e.ps1 -Iso dist\archinstall-offline-<date>-x86_64.iso [-Mode laptop]` |
+| Build and verify the ISOs | `.\scripts\rebuild-all.ps1 -SkipImage -WindowsIso .\ISO\<your Windows ISO> [-OutDir <folder>]` |

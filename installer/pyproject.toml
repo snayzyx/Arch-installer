@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dualboot-installer"
+version = "0.1.0"
+description = "ArchInstall: Arch Linux + Windows 11 dual boot installer (TUI)"
+requires-python = ">=3.11"
+dependencies = ["textual>=1.0"]
+
+[project.optional-dependencies]
+dev = ["pytest", "tzlocal", "tzdata"]
+
+[tool.setuptools.packages.find]
+include = ["dualboot_installer*"]
+
+[tool.setuptools.package-data]
+dualboot_installer = ["*.tcss"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -1,0 +1,127 @@
+Screen {
+  align: center top;
+}
+
+#wizard {
+  width: 100%;
+  max-width: 120;
+  height: 1fr;
+  padding: 0 2;
+}
+
+#wizard-step {
+  color: $text-muted;
+}
+
+#wizard-title {
+  text-style: bold;
+  color: $accent;
+  margin-bottom: 1;
+}
+
+#wizard-intro {
+  margin-bottom: 1;
+}
+
+#wizard-body {
+  height: 1fr;
+  border: round $primary;
+  padding: 0 1;
+}
+
+#wizard-error {
+  color: $error;
+  height: auto;
+  min-height: 1;
+  margin-top: 1;
+}
+
+#wizard-nav {
+  height: 3;
+  align-horizontal: right;
+}
+
+#wizard-nav Button {
+  margin-left: 2;
+}
+
+.section {
+  text-style: bold;
+  color: $accent;
+  margin-top: 1;
+}
+
+.field-label {
+  margin-top: 1;
+}
+
+.hint {
+  color: $text-muted;
+}
+
+.field-box {
+  height: auto;
+}
+
+.switch-row {
+  height: 3;
+  margin-top: 1;
+}
+
+.switch-label {
+  padding: 1 0 0 1;
+}
+
+.buttons {
+  height: 3;
+  margin-top: 1;
+}
+
+.buttons Button {
+  margin-right: 2;
+}
+
+#region-columns {
+  height: auto;
+}
+
+#region-columns .column {
+  width: 1fr;
+  height: auto;
+  padding-right: 2;
+}
+
+#wifi-list {
+  height: 8;
+}
+
+#disks {
+  height: auto;
+  max-height: 14;
+}
+
+#disk-warning, .disk-warning {
+  color: $error;
+  text-style: bold;
+  margin: 1 0;
+}
+
+#disk-selected {
+  margin-top: 1;
+}
+
+#gpu {
+  height: auto;
+  max-height: 9;
+}
+
+#steps {
+  height: auto;
+  margin-bottom: 1;
+}
+
+#log {
+  height: 1fr;
+  min-height: 8;
+  border: round $primary-darken-2;
+}

@@ -1,0 +1,25 @@
+# Build output and local media (ISOs are large and must not be redistributed)
+/out/
+/dist/
+/.tmp/
+/work/
+/ISO/
+*.iso
+*.qcow2
+*.img
+*.fd
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

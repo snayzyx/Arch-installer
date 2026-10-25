@@ -1,0 +1,36 @@
+# Extra packages appended to the archiso releng package list.
+
+# Installer runtime
+python
+python-textual
+python-tzlocal
+
+# Disks, filesystems and encryption
+gptfdisk
+parted
+dosfstools
+ntfs-3g
+e2fsprogs
+btrfs-progs
+xfsprogs
+cryptsetup
+mtools
+
+# Windows image handling
+wimlib
+libarchive
+
+# Boot loader and Secure Boot
+grub
+efibootmgr
+sbctl
+sbsigntools
+mokutil
+openssl
+
+# Hardware detection, mirrors, networking, console font
+pciutils
+dmidecode
+reflector
+curl
+terminus-font
